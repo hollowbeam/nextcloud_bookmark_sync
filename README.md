@@ -1,6 +1,6 @@
-# 🔄 Netcloud Bookmark Sync
+# 🔄 Nextcloud Bookmark Sync
 
-**Netcloud Bookmark Sync** is a privacy-first, cross-browser extension that synchronizes your bookmarks using your own Nextcloud server via WebDAV.
+**Nextcloud Bookmark Sync** is a privacy-first, cross-browser extension that synchronizes your bookmarks using your own Nextcloud server via WebDAV.
 
 Say goodbye to Big Tech's cloud services. Keep your bookmarks perfectly synced across Brave, Chrome, Edge, and Firefox without your data ever leaving your control.
 
@@ -37,7 +37,7 @@ Before using this extension, you will need:
 
 ## ⚙️ Configuration & Usage
 
-1. Click on the **Netcloud Bookmark Sync** icon in your browser toolbar.
+1. Click on the **Nextcloud Bookmark Sync** icon in your browser toolbar.
 2. Click the **Gear icon** (⚙️) to open the Settings view.
 3. Fill in your credentials:
    * **Target Folder URL:** Your Nextcloud WebDAV path.

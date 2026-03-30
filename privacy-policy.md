@@ -1,8 +1,8 @@
-# Privacy Policy for Netcloud Bookmark Sync
+# Privacy Policy for Nextcloud Bookmark Sync
 
 Effective Date: March 30, 2026
 
-Netcloud Bookmark Sync ("the Extension") was built from the ground up with a strict privacy-first philosophy. This policy explains how your data is handled.
+Nextcloud Bookmark Sync ("the Extension") was built from the ground up with a strict privacy-first philosophy. This policy explains how your data is handled.
 
 1. No Data Collection by the Developer
 The developer of this Extension does not collect, store, access, or transmit any of your personal data, browsing history, or bookmarks. We do not operate any intermediary servers.
