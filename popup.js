@@ -1,7 +1,7 @@
 // popup.js
 /*
-    Netcloud Bookmark Sync
-    Copyright (C) 2026  [Votre Nom ou Pseudonyme]
+    Nextcloud Bookmark Sync
+    Copyright (C) 2026  Hollow Inc.
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -27,7 +27,37 @@ async function getBrowserPrefix() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-    // 1. View Navigation Logic
+    // 1. Load the setting
+    chrome.storage.local.get(['autoSyncEnabled'], (result) => {
+        // Default to 'true' if the setting has never been saved
+        document.getElementById('autoSyncEnabled').checked = result.autoSyncEnabled !== false;
+    });
+
+    // 2. Add to the auto-save logic (Updated for Main View)
+    document.getElementById('autoSyncEnabled').addEventListener('change', (e) => {
+        const isEnabled = e.target.checked;
+        chrome.storage.local.set({ autoSyncEnabled: isEnabled }, () => {
+
+            // Show status feedback directly on the main view
+            const status = document.getElementById('status');
+            status.style.color = isEnabled ? "#27ae60" : "#777";
+            status.textContent = isEnabled ? "Auto-sync enabled" : "Auto-sync disabled";
+
+            setTimeout(() => {
+                if (status.textContent.includes("Auto-sync")) {
+                    status.textContent = '';
+                }
+            }, 2000);
+
+            // Notify background script to stop/start timers
+            chrome.runtime.sendMessage({
+                action: "toggle_auto_sync",
+                enabled: isEnabled
+            });
+        });
+    });
+
+    // 3. View Navigation Logic
     const mainView = document.getElementById('mainView');
     const settingsView = document.getElementById('settingsView');
 
@@ -41,7 +71,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         mainView.classList.add('active');
     });
 
-    // 2. Load Settings & Initialize ID
+    // 4. Load Settings & Initialize ID
     chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId', 'syncFrequency'], async (result) => {
         if (result.serverUrl) document.getElementById('serverUrl').value = result.serverUrl;
         if (result.username) document.getElementById('username').value = result.username;
@@ -57,7 +87,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
-    // 3. Auto-Save Logic (Triggers when user stops typing or changes dropdown)
+    // 5. Auto-Save Logic (Triggers when user stops typing or changes dropdown)
     const inputs = ['serverUrl', 'username', 'password', 'syncFrequency'];
     let timeoutId;
 
@@ -85,7 +115,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 });
 
-// 4. Main Actions (Push & Pull)
+// 6. Main Actions (Push & Pull)
 function handleSyncAction(actionName, btnId, activeColor, loadingText) {
     document.getElementById(btnId).addEventListener('click', () => {
         const status = document.getElementById('status');

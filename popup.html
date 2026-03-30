@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Netcloud Bookmark Sync</title>
+    <title>Nextcloud Bookmark Sync</title>
     <style>
         body { width: 320px; padding: 15px; font-family: system-ui, -apple-system, sans-serif; background-color: #f8f9fa; color: #333; margin: 0; }
 
@@ -41,8 +41,8 @@
 
     <div class="header">
         <div class="logo-container">
-            <img src="icon48.png" alt="Netcloud Bookmark Sync Logo" class="icon">
-            <h2>Netcloud Bookmark Sync</h2>
+            <img src="icon48.png" alt="Nextcloud Bookmark Sync Logo" class="icon">
+            <h2>Nextcloud Bookmark Sync</h2>
         </div>
         <button id="goToSettingsBtn" class="gear-btn" title="Settings">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -55,6 +55,14 @@
     <div id="mainView" class="view active">
         <button id="pushBtn" class="action-btn">Export to Nextcloud</button>
         <button id="pullBtn" class="action-btn">Import from Nextcloud</button>
+
+        <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #eee;">
+            <label style="display: flex; align-items: center; justify-content: space-between; cursor: pointer; margin: 0; font-size: 13px;">
+                <span style="font-weight: 600; color: #444;">🤖 Automatic Background Sync</span>
+                <input type="checkbox" id="autoSyncEnabled" style="width: auto; margin: 0; transform: scale(1.2);">
+            </label>
+        </div>
+
         <div id="status"></div>
     </div>
 
@@ -76,6 +84,9 @@
             <option value="15" selected>Every 15 minutes</option>
             <option value="30">Every 30 minutes</option>
         </select>
+        <p style="font-size: 11px; color: #777; margin-top: 4px; font-style: italic;">
+            Note: This frequency is only used if "Automatic Background Sync" is enabled on the main screen.
+        </p>
 
         <div id="saveIndicator" class="save-indicator">Saved!</div>
     </div>

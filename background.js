@@ -1,6 +1,6 @@
 // background.js
 /*
-    Netcloud Bookmark Sync
+    Nextcloud Bookmark Sync
     Copyright (C) 2026  Hollow Inc.
 
     This program is free software: you can redistribute it and/or modify
@@ -278,12 +278,19 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
 
 // Handles debouncing for local changes
 function scheduleAutomaticPush() {
-    if (isSyncing) return;
+    chrome.storage.local.get(['autoSyncEnabled'], (result) => {
+        if (result.autoSyncEnabled === false) {
+            console.log("⏸️ Auto-sync is disabled. Skipping automatic push.");
+            return;
+        }
 
-    if (syncTimeout) clearTimeout(syncTimeout);
-    syncTimeout = setTimeout(() => {
-        pushBookmarksToServer();
-    }, 5000);
+        if (isSyncing) return;
+
+        if (syncTimeout) clearTimeout(syncTimeout);
+        syncTimeout = setTimeout(() => {
+            pushBookmarksToServer();
+        }, 5000);
+    });
 }
 
 // 1. Listen to Local Changes (Safe approach for cross-browser)
@@ -311,7 +318,13 @@ setupAlarm();
 
 chrome.alarms?.onAlarm.addListener((alarm) => {
     if (alarm.name === "autoPullAlarm") {
-        pullBookmarksFromServer();
+        chrome.storage.local.get(['autoSyncEnabled'], (result) => {
+            if (result.autoSyncEnabled === false) {
+                console.log("⏰ Periodic pull skipped (Auto-sync disabled).");
+                return;
+            }
+            pullBookmarksFromServer();
+        });
     }
 });
 
@@ -326,5 +339,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     } else if (request.action === "update_alarm") {
         setupAlarm(); // Reconfigure alarm when user changes the dropdown
         sendResponse({ status: "success" });
-    }
+    } else if (request.action === "toggle_auto_sync") {
+        if (request.enabled) {
+            setupAlarm(); // Re-enable periodic alarm
+        } else {
+            chrome.alarms.clear("autoPullAlarm"); // Stop the alarm immediately
+        }
+        sendResponse({ status: "success" });
+}
 });
