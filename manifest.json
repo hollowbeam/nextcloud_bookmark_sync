@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Nextcloud Bookmark Sync",
-  "version": "1.0",
+  "name": "Netcloud Bookmark Sync",
+  "version": "1.2",
   "description": "Cross-browser bookmark synchronization via Nextcloud WebDAV.",
   "permissions": [
     "bookmarks",
@@ -13,7 +13,7 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Nextcloud Bookmark Sync",
+    "default_title": "Netcloud Bookmark Sync",
     "default_icon": {
       "48": "icon48.png",
       "128": "icon128.png"
@@ -29,7 +29,10 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "nextcloud-bookmark-sync@hollow.ovh"
+      "id": "netcloud-bookmark-sync@hollow.ovh",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
     }
   }
 }
