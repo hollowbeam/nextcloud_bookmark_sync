@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Netcloud Bookmark Sync</title>
+    <style>
+        body { width: 320px; padding: 15px; font-family: system-ui, -apple-system, sans-serif; background-color: #f8f9fa; color: #333; margin: 0; }
+
+        /* Header styling */
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #eee; padding-bottom: 10px; margin-bottom: 15px; }
+        .logo-container { display: flex; align-items: center; gap: 8px; }
+        h2 { margin: 0; color: #0082c9; font-size: 16px; } /* Slightly smaller for the longer name */
+
+        /* Icons styling */
+        .icon { width: 28px; height: 28px; object-fit: contain; }
+        .gear-btn { background: none; border: none; cursor: pointer; color: #666; transition: transform 0.3s ease, color 0.3s; padding: 0; display: flex; align-items: center; }
+        .gear-btn:hover { transform: rotate(90deg); color: #0082c9; }
+        .back-btn { background: none; border: none; cursor: pointer; color: #0082c9; font-weight: bold; font-size: 14px; text-decoration: underline; padding: 0; margin-bottom: 15px; }
+
+        /* Views management */
+        .view { display: none; }
+        .view.active { display: block; }
+
+        /* Form elements */
+        label { display: block; margin-top: 12px; font-size: 12px; font-weight: 600; color: #555; }
+        input, select { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; background: #fff; }
+        input:focus, select:focus { border-color: #0082c9; outline: none; box-shadow: 0 0 0 2px rgba(0, 130, 201, 0.2); }
+
+        /* Buttons */
+        .action-btn { width: 100%; padding: 12px; margin-top: 12px; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 14px; transition: opacity 0.2s; }
+        .action-btn:hover { opacity: 0.9; }
+        #pushBtn { background-color: #27ae60; }
+        #pullBtn { background-color: #e67e22; }
+
+        /* Status message */
+        #status { margin-top: 15px; font-weight: bold; font-size: 13px; text-align: center; height: 16px; transition: color 0.3s; }
+        .save-indicator { font-size: 11px; color: #27ae60; text-align: right; height: 14px; margin-top: 4px; opacity: 0; transition: opacity 0.3s; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div class="logo-container">
+            <img src="icon48.png" alt="Netcloud Bookmark Sync Logo" class="icon">
+            <h2>Netcloud Bookmark Sync</h2>
+        </div>
+        <button id="goToSettingsBtn" class="gear-btn" title="Settings">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+        </button>
+    </div>
+
+    <div id="mainView" class="view active">
+        <button id="pushBtn" class="action-btn">Export to Nextcloud</button>
+        <button id="pullBtn" class="action-btn">Import from Nextcloud</button>
+        <div id="status"></div>
+    </div>
+
+    <div id="settingsView" class="view">
+        <button id="goToMainBtn" class="back-btn">← Back to Sync</button>
+
+        <label for="serverUrl">Nextcloud Target Folder URL</label>
+        <input type="text" id="serverUrl" placeholder="https://[server]/remote.php/dav/files/[user]/">
+
+        <label for="username">Nextcloud Username</label>
+        <input type="text" id="username">
+
+        <label for="password">App Password</label>
+        <input type="password" id="password">
+
+        <label for="syncFrequency">Auto-Sync Frequency (Background)</label>
+        <select id="syncFrequency">
+            <option value="5">Every 5 minutes</option>
+            <option value="15" selected>Every 15 minutes</option>
+            <option value="30">Every 30 minutes</option>
+        </select>
+
+        <div id="saveIndicator" class="save-indicator">Saved!</div>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>
