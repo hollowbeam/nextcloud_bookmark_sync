@@ -15,6 +15,7 @@ Say goodbye to Big Tech's cloud services. Keep your bookmarks perfectly synced a
 ## 📋 Prerequisites
 
 Before using this extension, you will need:
+
 1. A running **Nextcloud** instance.
 2. Your Nextcloud WebDAV URL (usually `https://[your-server]/remote.php/dav/files/[your-username]/`).
 3. An **App Password** generated from your Nextcloud Security settings (Do not use your main Nextcloud password!).
@@ -24,6 +25,7 @@ Before using this extension, you will need:
 *Note: Official links to the Chrome Web Store and Mozilla Add-ons will be added here once the extension is published.*
 
 **Manual Installation (Developer Mode):**
+
 1. Download or clone this repository to your computer.
 2. **Chrome / Brave / Edge:**
    * Go to `chrome://extensions/` (or `brave://extensions/`).
