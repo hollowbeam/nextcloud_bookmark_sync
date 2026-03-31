@@ -35,6 +35,76 @@
         /* Status message */
         #status { margin-top: 15px; font-weight: bold; font-size: 13px; text-align: center; height: 16px; transition: color 0.3s; }
         .save-indicator { font-size: 11px; color: #27ae60; text-align: right; height: 14px; margin-top: 4px; opacity: 0; transition: opacity 0.3s; }
+
+        /* --- CROSS-BROWSER RANGE SLIDER STYLING --- */
+
+        /* Base reset for all browsers */
+        input[type="range"] {
+            -webkit-appearance: none;
+            -moz-appearance: none;
+            appearance: none;
+            width: 100%;
+            background: transparent;
+            margin: 10px 0;
+        }
+
+        input[type="range"]:focus {
+            outline: none;
+        }
+
+        /* === 1. WEBKIT (Brave, Chrome, Edge) === */
+
+        /* The track */
+        input[type="range"]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            border: none;
+        }
+
+        /* The thumb */
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 18px;
+            width: 18px;
+            border-radius: 50%;
+            background: #0082c9;
+            cursor: pointer;
+            margin-top: -6px; /* Centers the thumb on WebKit */
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+
+        input[type="range"]::-webkit-slider-thumb:hover {
+            background: #006da8;
+        }
+
+        /* === 2. MOZILLA (Firefox) === */
+
+        /* The track */
+        input[type="range"]::-moz-range-track {
+            width: 100%;
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            border: none;
+        }
+
+        /* The thumb */
+        input[type="range"]::-moz-range-thumb {
+            height: 18px;
+            width: 18px;
+            border-radius: 50%;
+            background: #0082c9;
+            cursor: pointer;
+            border: none; /* Firefox adds an ugly default border, we remove it */
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+            /* Note: Firefox auto-centers the thumb, so no margin-top is needed here */
+        }
+
+        input[type="range"]::-moz-range-thumb:hover {
+            background: #006da8;
+        }
     </style>
 </head>
 <body>
@@ -87,6 +157,11 @@
         <p style="font-size: 11px; color: #777; margin-top: 4px; font-style: italic;">
             Note: This frequency is only used if "Automatic Background Sync" is enabled on the main screen.
         </p>
+        <label for="retentionDays">Archive Retention (1-30 days)</label>
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <input type="range" id="retentionDays" min="1" max="30" value="30" style="flex: 1;">
+            <span id="daysValue">30 days</span>
+        </div>
 
         <div id="saveIndicator" class="save-indicator">Saved!</div>
     </div>
