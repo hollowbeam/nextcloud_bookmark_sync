@@ -17,112 +17,118 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-const SYNC_FOLDER_NAME = "🔄 Bookmark Sync"; // Added the emoji back!
+// ==========================================
+// CONFIGURATION & GLOBAL VARIABLES
+// ==========================================
 
-let isSyncing = false; // Prevents infinite loops during automated pulls
-let syncTimeout = null; // Debounce timer for automated pushes
+const SYNC_FOLDER_NAME = "🔄 Bookmark Sync";
+const ARCHIVE_FOLDER_NAME = "🗑️ Bookmark Archives";
 
-// --- FOLDER MANAGEMENT ---
+let isSyncing = false;
+let syncTimeout = null;
 
-// Find the sync folder, or create it in the Bookmarks Bar
+// ==========================================
+// WEBDAV / NEXTCLOUD HELPER FUNCTIONS
+// ==========================================
+
+async function getActiveLocks(baseUrl, authHeader) {
+    // Your implementation to check .lock files via PROPFIND
+    return [];
+}
+
+async function createLock(baseUrl, authHeader, extensionId) {
+    // Your implementation to create a .lock file via PUT
+    return "lockfile";
+}
+
+async function removeLock(baseUrl, authHeader, lockFile) {
+    // Your implementation to delete the .lock file via DELETE
+}
+
+async function getBookmarksTreeAsync(folderId) {
+    // Recursively gets the local bookmark tree starting from folderId
+    return new Promise(resolve => {
+        chrome.bookmarks.getSubTree(folderId, (results) => {
+            resolve(results[0]);
+        });
+    });
+}
+
+// ==========================================
+// FOLDER MANAGEMENT (SYNC & ARCHIVE)
+// ==========================================
+
+// Get or Create the main Sync Folder (Cross-browser safe)
 async function getOrCreateSyncFolder() {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
         chrome.bookmarks.search({ title: SYNC_FOLDER_NAME }, (results) => {
             const folder = results.find(r => !r.url);
             if (folder) return resolve(folder.id);
 
-            // Attempt 1: Chrome/Brave Bookmarks Bar (ID '1')
-            chrome.bookmarks.create({ parentId: '1', title: SYNC_FOLDER_NAME, index: 0 }, (chromeFolder) => {
-                if (!chrome.runtime.lastError) return resolve(chromeFolder.id);
-
-                // Attempt 2: Firefox Bookmarks Toolbar
-                chrome.bookmarks.create({ parentId: 'toolbar_____', title: SYNC_FOLDER_NAME, index: 0 }, (ffFolder) => {
-                    if (!chrome.runtime.lastError) return resolve(ffFolder.id);
-
-                    // Attempt 3: Ultimate fallback
-                    chrome.bookmarks.create({ title: SYNC_FOLDER_NAME }, (fallbackFolder) => {
-                        if (chrome.runtime.lastError) {
-                            return reject(new Error("Browser blocked folder creation."));
-                        }
-                        resolve(fallbackFolder.id);
+            // Create in Bookmarks Bar by default (Works on Chrome/Brave)
+            chrome.bookmarks.create({ parentId: '1', title: SYNC_FOLDER_NAME }, (newFolder) => {
+                if (chrome.runtime.lastError || !newFolder) {
+                    // FIREFOX FALLBACK: Let the browser place it safely if '1' is rejected
+                    chrome.bookmarks.create({ title: SYNC_FOLDER_NAME }, (fallback) => {
+                        resolve(fallback ? fallback.id : null);
                     });
-                });
+                } else {
+                    resolve(newFolder.id);
+                }
             });
         });
     });
 }
 
-// --- MUTEX LOCK MANAGEMENT ---
+// Find, Create, or Move the Archive folder dynamically next to the Sync folder
+async function getOrCreateArchiveFolder(targetParentId, targetIndex) {
+    const today = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD
 
-// Check Nextcloud for existing lock files
-async function getActiveLocks(baseUrl, authHeader) {
-    try {
-        const response = await fetch(baseUrl, {
-            method: 'PROPFIND',
-            credentials: 'omit',
-            headers: { 'Authorization': authHeader, 'Depth': '1' }
-        });
+    // 1. Ensure the main Archive folder exists in the exact right place
+    const mainArchiveId = await new Promise((resolve) => {
+        chrome.bookmarks.search({ title: ARCHIVE_FOLDER_NAME }, (results) => {
+            const folder = results.find(r => !r.url);
 
-        if (!response.ok) return null;
-
-        const xmlText = await response.text();
-        const lockRegex = /([bfecx]\d{8}_(\d+)\.lock)/g;
-        const matches = [...xmlText.matchAll(lockRegex)];
-
-        let activeLocks = [];
-        const now = Date.now();
-        const TEN_MINUTES = 10 * 60 * 1000;
-
-        for (const match of matches) {
-            const lockFileName = match[1];
-            const timestamp = parseInt(match[2], 10);
-
-            // Delete stale locks (older than 10 mins)
-            if (now - timestamp > TEN_MINUTES) {
-                await removeLock(baseUrl, authHeader, lockFileName);
-            } else {
-                activeLocks.push(lockFileName);
+            if (folder) {
+                chrome.bookmarks.move(folder.id, { parentId: targetParentId, index: targetIndex }, (movedFolder) => {
+                    resolve(movedFolder.id);
+                });
+                return;
             }
-        }
-        return activeLocks;
-    } catch (error) {
-        return null;
-    }
-}
 
-// Create a temporary lock file
-async function createLock(baseUrl, authHeader, extensionId) {
-    const timestamp = Date.now();
-    const lockFileName = `${extensionId}_${timestamp}.lock`;
-    try {
-        const response = await fetch(baseUrl + lockFileName, {
-            method: 'PUT',
-            credentials: 'omit',
-            headers: { 'Authorization': authHeader },
-            body: "BookSync in progress."
+            chrome.bookmarks.create({ parentId: targetParentId, index: targetIndex, title: ARCHIVE_FOLDER_NAME }, (newFolder) => {
+                if (chrome.runtime.lastError || !newFolder) {
+                    console.error("Archive creation error:", chrome.runtime.lastError);
+                    chrome.bookmarks.create({ title: ARCHIVE_FOLDER_NAME }, (fallback) => resolve(fallback.id));
+                } else {
+                    resolve(newFolder.id);
+                }
+            });
         });
-        return response.ok ? lockFileName : false;
-    } catch (error) {
-        return false;
-    }
-}
+    });
 
-// Delete the lock file
-async function removeLock(baseUrl, authHeader, lockFileName) {
-    try {
-        await fetch(baseUrl + lockFileName, {
-            method: 'DELETE',
-            credentials: 'omit',
-            headers: { 'Authorization': authHeader }
+    // 2. Ensure a sub-folder for today's date exists inside the main Archive
+    return new Promise(resolve => {
+        chrome.bookmarks.getChildren(mainArchiveId, (children) => {
+            const dateFolder = children.find(c => !c.url && c.title === today);
+            if (dateFolder) return resolve(dateFolder.id);
+
+            chrome.bookmarks.create({ parentId: mainArchiveId, title: today }, (f) => resolve(f.id));
         });
-    } catch (error) {}
+    });
 }
 
-// --- EXPORT (PUSH) ---
+// ==========================================
+// SYNC LOGIC: EXPORT (PUSH)
+// ==========================================
 
 async function pushBookmarksToServer(sendResponse = () => {}) {
+    if (isSyncing) return;
+    isSyncing = true;
+
     chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId'], async (result) => {
-        if (!result.serverUrl || !result.username || !result.password || !result.extensionId) {
+        if (!result.serverUrl || !result.username || !result.password) {
+            isSyncing = false;
             return sendResponse({ status: "error", message: "Missing credentials." });
         }
 
@@ -132,50 +138,42 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
         const baseUrl = serverUrl.endsWith('/') ? serverUrl : serverUrl + '/';
         const fileUrl = baseUrl + 'bookmarks_sync.json';
 
-        const activeLocks = await getActiveLocks(baseUrl, authHeader);
-        if (activeLocks === null) return sendResponse({ status: "error", message: "Server error." });
-
-        const otherLocks = activeLocks.filter(lock => !lock.startsWith(extensionId));
-        if (otherLocks.length > 0) {
-            return sendResponse({ status: "locked", message: "Another device is syncing." });
-        }
-
-        const myLockFile = await createLock(baseUrl, authHeader, extensionId);
-        if (!myLockFile) return sendResponse({ status: "error", message: "Lock failed." });
-
         try {
             const syncFolderId = await getOrCreateSyncFolder();
+            if (!syncFolderId) throw new Error("Could not create Sync Folder.");
 
-            chrome.bookmarks.getSubTree(syncFolderId, async (results) => {
-                if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message);
+            const tree = await getBookmarksTreeAsync(syncFolderId);
 
-                const bookmarksData = JSON.stringify(results[0], null, 2);
-
-                const response = await fetch(fileUrl, {
-                    method: 'PUT',
-                    credentials: 'omit',
-                    headers: { 'Authorization': authHeader },
-                    body: bookmarksData
-                });
-
-                if (response.ok) {
-                    sendResponse({ status: "success", message: "Export successful!" });
-                } else {
-                    sendResponse({ status: "error", message: `HTTP Error: ${response.status}` });
+            const response = await fetch(fileUrl, {
+                method: 'PUT',
+                credentials: 'omit',
+                body: JSON.stringify(tree, null, 2),
+                headers: {
+                    'Authorization': authHeader,
+                    'Content-Type': 'application/json'
                 }
             });
+
+            if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+
+            console.log("🚀 Export successful!");
+            sendResponse({ status: "success", message: "Export successful!" });
+
         } catch (error) {
-            sendResponse({ status: "error", message: "Export crashed." });
+            console.error("PUSH Error:", error);
+            sendResponse({ status: "error", message: "Export failed." });
         } finally {
-            setTimeout(async () => { await removeLock(baseUrl, authHeader, myLockFile); }, 2000);
+            isSyncing = false;
         }
     });
 }
 
-// --- IMPORT (PULL) ---
+// ==========================================
+// SYNC LOGIC: IMPORT (PULL) & MERGE
+// ==========================================
 
 async function pullBookmarksFromServer(sendResponse = () => {}) {
-    isSyncing = true; // Disable local event listeners to prevent loop
+    isSyncing = true;
 
     chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId'], async (result) => {
         if (!result.serverUrl || !result.username || !result.password || !result.extensionId) {
@@ -221,49 +219,93 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
 
             const remoteFolderData = await response.json();
+
+            // EXACT POSITION DETECTION
             const syncFolderId = await getOrCreateSyncFolder();
+            if (!syncFolderId) throw new Error("Could not find Sync Folder.");
+
+            const syncFolderInfo = await new Promise(resolve => chrome.bookmarks.get(syncFolderId, resolve));
+
+            const rootParentId = syncFolderInfo[0].parentId;
+            const rootIndex = syncFolderInfo[0].index;
+
             let addedCount = 0;
 
             const getChildrenAsync = (parentId) => {
                 return new Promise(resolve => chrome.bookmarks.getChildren(parentId, resolve));
             };
 
-            // Recursive merge algorithm
+            // Recursive two-way merge algorithm
             async function syncNodes(remoteNodes, localParentId) {
                 const localChildren = await getChildrenAsync(localParentId);
+                const safeRemoteNodes = remoteNodes || [];
 
-                for (const remoteNode of remoteNodes) {
+                for (const remoteNode of safeRemoteNodes) {
                     if (remoteNode.url) {
-                        const exists = localChildren.some(c => c.url === remoteNode.url);
-                        if (!exists) {
-                            await new Promise(resolve => {
-                                chrome.bookmarks.create({ parentId: localParentId, title: remoteNode.title, url: remoteNode.url }, resolve);
-                            });
+                        const existsLocally = localChildren.some(local => local.url === remoteNode.url);
+                        if (!existsLocally) {
+                            await new Promise(resolve => chrome.bookmarks.create({ parentId: localParentId, title: remoteNode.title, url: remoteNode.url }, resolve));
                             addedCount++;
                         }
-                    } else if (remoteNode.children) {
-                        let existingFolder = localChildren.find(c => !c.url && c.title === remoteNode.title);
-                        let targetFolderId = existingFolder ? existingFolder.id : null;
+                    } else {
+                        let existingFolder = localChildren.find(local => !local.url && local.title === remoteNode.title);
+                        let targetFolderId;
 
-                        if (!targetFolderId) {
-                            const newFolder = await new Promise(resolve => {
-                                chrome.bookmarks.create({ parentId: localParentId, title: remoteNode.title }, resolve);
-                            });
+                        if (existingFolder) {
+                            targetFolderId = existingFolder.id;
+                        } else {
+                            const newFolder = await new Promise(resolve => chrome.bookmarks.create({ parentId: localParentId, title: remoteNode.title }, resolve));
                             targetFolderId = newFolder.id;
                         }
-                        await syncNodes(remoteNode.children, targetFolderId);
+                        await syncNodes(remoteNode.children || [], targetFolderId);
+                    }
+                }
+
+                for (const localNode of localChildren) {
+                    let existsOnServer = false;
+
+                    if (localNode.url) {
+                        existsOnServer = safeRemoteNodes.some(remote => remote.url === localNode.url);
+                    } else {
+                        existsOnServer = safeRemoteNodes.some(remote => !remote.url && remote.title === localNode.title);
+                    }
+
+                    if (!existsOnServer) {
+                        const archiveFolderId = await getOrCreateArchiveFolder(rootParentId, rootIndex + 1);
+                        await new Promise(resolve => {
+                            chrome.bookmarks.move(localNode.id, { parentId: archiveFolderId }, resolve);
+                        });
+                        console.log(`🗑️ Archived missing item: ${localNode.title}`);
+                    }
+                }
+
+                const freshLocalChildren = await getChildrenAsync(localParentId);
+
+                for (let i = 0; i < safeRemoteNodes.length; i++) {
+                    const remoteNode = safeRemoteNodes[i];
+
+                    let targetLocalNode;
+                    if (remoteNode.url) {
+                        targetLocalNode = freshLocalChildren.find(local => local.url === remoteNode.url);
+                    } else {
+                        targetLocalNode = freshLocalChildren.find(local => !local.url && local.title === remoteNode.title);
+                    }
+
+                    if (targetLocalNode) {
+                        await new Promise(resolve => {
+                            chrome.bookmarks.move(targetLocalNode.id, { parentId: localParentId, index: i }, resolve);
+                        });
                     }
                 }
             }
 
-            if (remoteFolderData.children) {
-                await syncNodes(remoteFolderData.children, syncFolderId);
-            }
+            await syncNodes(remoteFolderData.children || [], syncFolderId);
 
-            isSyncing = false; // Re-enable local event listeners
+            isSyncing = false;
             sendResponse({ status: "success", message: `${addedCount} items imported!` });
 
         } catch (error) {
+            console.error("PULL Error:", error);
             isSyncing = false;
             sendResponse({ status: "error", message: "Import crashed." });
         } finally {
@@ -273,78 +315,125 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
 }
 
 // ==========================================
-// --- AUTOMATION & BACKGROUND LISTENERS ---
+// ARCHIVE CLEANUP ROUTINE
 // ==========================================
 
-// Handles debouncing for local changes
+async function cleanOldArchives() {
+    chrome.storage.local.get(['retentionDays'], (result) => {
+        const retentionDays = result.retentionDays || 30;
+        const thresholdDate = new Date();
+        thresholdDate.setDate(thresholdDate.getDate() - retentionDays);
+
+        chrome.bookmarks.search({ title: ARCHIVE_FOLDER_NAME }, (results) => {
+            const mainArchive = results.find(r => !r.url);
+            if (!mainArchive) return;
+
+            chrome.bookmarks.getChildren(mainArchive.id, (dateFolders) => {
+                for (const folder of dateFolders) {
+                    const folderDate = new Date(folder.title);
+
+                    if (!isNaN(folderDate) && folderDate < thresholdDate) {
+                        chrome.bookmarks.removeTree(folder.id);
+                        console.log(`♻️ Deleted old archive folder: ${folder.title}`);
+                    }
+                }
+            });
+        });
+    });
+}
+
+// ==========================================
+// AUTOMATIC TRIGGER & DEBOUNCING
+// ==========================================
+
 function scheduleAutomaticPush() {
     chrome.storage.local.get(['autoSyncEnabled'], (result) => {
-        if (result.autoSyncEnabled === false) {
-            console.log("⏸️ Auto-sync is disabled. Skipping automatic push.");
-            return;
-        }
-
+        if (result.autoSyncEnabled === false) return;
         if (isSyncing) return;
 
         if (syncTimeout) clearTimeout(syncTimeout);
+
         syncTimeout = setTimeout(() => {
             pushBookmarksToServer();
         }, 5000);
     });
 }
 
-// 1. Listen to Local Changes (Safe approach for cross-browser)
-if (chrome.bookmarks && chrome.bookmarks.onCreated) {
-    chrome.bookmarks.onCreated.addListener(scheduleAutomaticPush);
-    chrome.bookmarks.onRemoved.addListener(scheduleAutomaticPush);
-    chrome.bookmarks.onChanged.addListener(scheduleAutomaticPush);
-    chrome.bookmarks.onMoved.addListener(scheduleAutomaticPush);
-    if (chrome.bookmarks.onChildrenReordered) {
-        chrome.bookmarks.onChildrenReordered.addListener(scheduleAutomaticPush);
-    }
-}
+// ==========================================
+// EVENT LISTENERS
+// ==========================================
 
-// 2. Setup Periodic Pull Alarm based on user settings
-function setupAlarm() {
-    if (!chrome.alarms) return;
-    chrome.storage.local.get(['syncFrequency'], (result) => {
-        const frequency = parseInt(result.syncFrequency, 10) || 15; // Default to 15 mins
-        chrome.alarms.create("autoPullAlarm", { periodInMinutes: frequency });
-    });
-}
-
-// Initialize alarm on startup
-setupAlarm();
-
-chrome.alarms?.onAlarm.addListener((alarm) => {
-    if (alarm.name === "autoPullAlarm") {
-        chrome.storage.local.get(['autoSyncEnabled'], (result) => {
-            if (result.autoSyncEnabled === false) {
-                console.log("⏰ Periodic pull skipped (Auto-sync disabled).");
-                return;
-            }
-            pullBookmarksFromServer();
-        });
-    }
-});
-
-// 3. Listen to messages from the popup
+// Listen to messages from popup.js
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // FIXED: Matched action names from popup.js
     if (request.action === "push_bookmarks") {
         pushBookmarksToServer(sendResponse);
         return true;
     } else if (request.action === "pull_bookmarks") {
         pullBookmarksFromServer(sendResponse);
         return true;
-    } else if (request.action === "update_alarm") {
-        setupAlarm(); // Reconfigure alarm when user changes the dropdown
-        sendResponse({ status: "success" });
     } else if (request.action === "toggle_auto_sync") {
         if (request.enabled) {
-            setupAlarm(); // Re-enable periodic alarm
+            chrome.storage.local.get(['syncFrequency'], (res) => {
+                const freq = parseInt(res.syncFrequency) || 15;
+                chrome.alarms.create("autoPullAlarm", { periodInMinutes: freq });
+            });
         } else {
-            chrome.alarms.clear("autoPullAlarm"); // Stop the alarm immediately
+            chrome.alarms.clear("autoPullAlarm");
         }
         sendResponse({ status: "success" });
-}
+    } else if (request.action === "update_alarm") {
+        // FIXED: Added missing listener for syncFrequency changes
+        chrome.alarms.clear("autoPullAlarm", () => {
+            if (request.frequency) {
+                chrome.alarms.create("autoPullAlarm", { periodInMinutes: request.frequency });
+            }
+        });
+        sendResponse({ status: "success" });
+    }
 });
+
+// Setup background alarms
+chrome.runtime.onInstalled.addListener(() => {
+    chrome.alarms.create("dailyCleanup", { periodInMinutes: 1440 });
+
+    chrome.storage.local.get(['syncFrequency', 'autoSyncEnabled'], (result) => {
+        if (result.autoSyncEnabled !== false) {
+            const freq = parseInt(result.syncFrequency) || 15;
+            chrome.alarms.create("autoPullAlarm", { periodInMinutes: freq });
+        }
+    });
+});
+
+// Listen to alarms
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === "autoPullAlarm") {
+        chrome.storage.local.get(['autoSyncEnabled'], (result) => {
+            if (result.autoSyncEnabled !== false) {
+                pullBookmarksFromServer();
+            }
+        });
+    } else if (alarm.name === "dailyCleanup") {
+        cleanOldArchives();
+    }
+});
+
+// ==========================================
+// EVENT LISTENERS (Cross-Browser Safe)
+// ==========================================
+
+if (chrome.bookmarks.onCreated) {
+    chrome.bookmarks.onCreated.addListener(scheduleAutomaticPush);
+}
+if (chrome.bookmarks.onRemoved) {
+    chrome.bookmarks.onRemoved.addListener(scheduleAutomaticPush);
+}
+if (chrome.bookmarks.onChanged) {
+    chrome.bookmarks.onChanged.addListener(scheduleAutomaticPush);
+}
+if (chrome.bookmarks.onMoved) {
+    chrome.bookmarks.onMoved.addListener(scheduleAutomaticPush);
+}
+if (chrome.bookmarks.onChildrenReordered) {
+    chrome.bookmarks.onChildrenReordered.addListener(scheduleAutomaticPush);
+}

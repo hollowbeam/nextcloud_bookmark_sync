@@ -17,7 +17,11 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-// Utility: Detect browser for unique ID generation
+// ==========================================
+// UTILITY FUNCTIONS
+// ==========================================
+
+// Detect browser for unique ID generation
 async function getBrowserPrefix() {
     if (navigator.brave && await navigator.brave.isBrave()) return 'b';
     if (navigator.userAgent.includes('Firefox')) return 'f';
@@ -26,14 +30,67 @@ async function getBrowserPrefix() {
     return 'x';
 }
 
+// ==========================================
+// MAIN INITIALIZATION
+// ==========================================
+
+// Wait for the DOM to be fully loaded before running scripts (fixes layout warnings)
 document.addEventListener('DOMContentLoaded', async () => {
-    // 1. Load the setting
-    chrome.storage.local.get(['autoSyncEnabled'], (result) => {
-        // Default to 'true' if the setting has never been saved
-        document.getElementById('autoSyncEnabled').checked = result.autoSyncEnabled !== false;
+
+    // 1. View Navigation Logic
+    const mainView = document.getElementById('mainView');
+    const settingsView = document.getElementById('settingsView');
+
+    document.getElementById('goToSettingsBtn').addEventListener('click', () => {
+        mainView.classList.remove('active');
+        settingsView.classList.add('active');
     });
 
-    // 2. Add to the auto-save logic (Updated for Main View)
+    document.getElementById('goToMainBtn').addEventListener('click', () => {
+        settingsView.classList.remove('active');
+        mainView.classList.add('active');
+    });
+
+
+    // 2. Load Settings & Initialize ID
+    chrome.storage.local.get([
+        'serverUrl', 'username', 'password', 'extensionId',
+        'syncFrequency', 'autoSyncEnabled', 'retentionDays'
+    ], async (result) => {
+
+        // Populate text inputs
+        if (result.serverUrl) document.getElementById('serverUrl').value = result.serverUrl;
+        if (result.username) document.getElementById('username').value = result.username;
+        if (result.password) document.getElementById('password').value = result.password;
+        if (result.syncFrequency) document.getElementById('syncFrequency').value = result.syncFrequency;
+
+        // Populate Auto-sync toggle (Default to true)
+        const autoSyncCheckbox = document.getElementById('autoSyncEnabled');
+        if (autoSyncCheckbox) {
+            autoSyncCheckbox.checked = result.autoSyncEnabled !== false;
+        }
+
+        // Populate Retention Slider (Default to 30 days)
+        const retentionDaysInput = document.getElementById('retentionDays');
+        const daysValueSpan = document.getElementById('daysValue');
+        if (retentionDaysInput && daysValueSpan) {
+            const days = result.retentionDays || 30;
+            retentionDaysInput.value = days;
+            daysValueSpan.textContent = days + (days == 1 ? ' day' : ' days');
+        }
+
+        // Generate Extension ID if missing
+        let extId = result.extensionId;
+        if (!extId) {
+            const prefix = await getBrowserPrefix();
+            const randomDigits = Math.floor(10000000 + Math.random() * 90000000);
+            extId = `${prefix}${randomDigits}`;
+            chrome.storage.local.set({ extensionId: extId });
+        }
+    });
+
+
+    // 3. Auto-Sync Toggle Logic (Main View)
     document.getElementById('autoSyncEnabled').addEventListener('change', (e) => {
         const isEnabled = e.target.checked;
         chrome.storage.local.set({ autoSyncEnabled: isEnabled }, () => {
@@ -57,37 +114,30 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
-    // 3. View Navigation Logic
-    const mainView = document.getElementById('mainView');
-    const settingsView = document.getElementById('settingsView');
 
-    document.getElementById('goToSettingsBtn').addEventListener('click', () => {
-        mainView.classList.remove('active');
-        settingsView.classList.add('active');
-    });
+    // 4. Archive Retention Slider Logic (Settings View)
+    const retentionDaysInput = document.getElementById('retentionDays');
+    const daysValueSpan = document.getElementById('daysValue');
 
-    document.getElementById('goToMainBtn').addEventListener('click', () => {
-        settingsView.classList.remove('active');
-        mainView.classList.add('active');
-    });
+    if (retentionDaysInput && daysValueSpan) {
+        // Update text dynamically while dragging
+        retentionDaysInput.addEventListener('input', (e) => {
+            const days = e.target.value;
+            daysValueSpan.textContent = days + (days == 1 ? ' day' : ' days');
+        });
 
-    // 4. Load Settings & Initialize ID
-    chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId', 'syncFrequency'], async (result) => {
-        if (result.serverUrl) document.getElementById('serverUrl').value = result.serverUrl;
-        if (result.username) document.getElementById('username').value = result.username;
-        if (result.password) document.getElementById('password').value = result.password;
-        if (result.syncFrequency) document.getElementById('syncFrequency').value = result.syncFrequency;
+        // Save to storage only when user drops the slider
+        retentionDaysInput.addEventListener('change', (e) => {
+            chrome.storage.local.set({ retentionDays: parseInt(e.target.value, 10) }, () => {
+                const indicator = document.getElementById('saveIndicator');
+                indicator.style.opacity = '1';
+                setTimeout(() => indicator.style.opacity = '0', 2000);
+            });
+        });
+    }
 
-        let extId = result.extensionId;
-        if (!extId) {
-            const prefix = await getBrowserPrefix();
-            const randomDigits = Math.floor(10000000 + Math.random() * 90000000);
-            extId = `${prefix}${randomDigits}`;
-            chrome.storage.local.set({ extensionId: extId });
-        }
-    });
 
-    // 5. Auto-Save Logic (Triggers when user stops typing or changes dropdown)
+    // 5. Debounced Auto-Save Logic (For text inputs and dropdowns)
     const inputs = ['serverUrl', 'username', 'password', 'syncFrequency'];
     let timeoutId;
 
@@ -97,6 +147,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             timeoutId = setTimeout(() => {
                 const value = e.target.value.trim();
                 chrome.storage.local.set({ [id]: value }, () => {
+
                     // Show small "Saved!" animation
                     const indicator = document.getElementById('saveIndicator');
                     indicator.style.opacity = '1';
@@ -113,30 +164,37 @@ document.addEventListener('DOMContentLoaded', async () => {
             }, 600); // 600ms debounce
         });
     });
-});
 
-// 6. Main Actions (Push & Pull)
-function handleSyncAction(actionName, btnId, activeColor, loadingText) {
-    document.getElementById(btnId).addEventListener('click', () => {
-        const status = document.getElementById('status');
-        status.style.color = activeColor;
-        status.textContent = loadingText;
 
-        chrome.runtime.sendMessage({ action: actionName }, (response) => {
-            if (response && response.status === "locked") {
-                status.style.color = "#c0392b"; // Red
-                status.textContent = response.message;
-            } else if (response && response.status === "success") {
-                status.style.color = activeColor;
-                status.textContent = response.message;
-            } else {
-                status.style.color = "#c0392b";
-                status.textContent = response ? response.message : "Error.";
-            }
-            setTimeout(() => { status.textContent = ''; }, 3500);
+    // 6. Main Actions (Push & Pull)
+    // Wrapped inside DOMContentLoaded so document.getElementById doesn't fail
+    function handleSyncAction(actionName, btnId, activeColor, loadingText) {
+        const btn = document.getElementById(btnId);
+        if (!btn) return;
+
+        btn.addEventListener('click', () => {
+            const status = document.getElementById('status');
+            status.style.color = activeColor;
+            status.textContent = loadingText;
+
+            chrome.runtime.sendMessage({ action: actionName }, (response) => {
+                if (response && response.status === "locked") {
+                    status.style.color = "#c0392b"; // Red
+                    status.textContent = response.message;
+                } else if (response && response.status === "success") {
+                    status.style.color = activeColor;
+                    status.textContent = response.message;
+                } else {
+                    status.style.color = "#c0392b";
+                    status.textContent = response ? response.message : "Error.";
+                }
+                setTimeout(() => { status.textContent = ''; }, 3500);
+            });
         });
-    });
-}
+    }
 
-handleSyncAction('push_bookmarks', 'pushBtn', '#27ae60', 'Exporting...');
-handleSyncAction('pull_bookmarks', 'pullBtn', '#e67e22', 'Importing...');
+    // Initialize the sync buttons with your specific action names
+    handleSyncAction('push_bookmarks', 'pushBtn', '#27ae60', 'Exporting...');
+    handleSyncAction('pull_bookmarks', 'pullBtn', '#e67e22', 'Importing...');
+
+});
