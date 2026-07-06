@@ -139,29 +139,43 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 5. Debounced Auto-Save Logic (For text inputs and dropdowns)
     const inputs = ['serverUrl', 'username', 'password', 'syncFrequency'];
-    let timeoutId;
+    const saveTimeouts = {};
+
+    function persistField(id) {
+        const value = document.getElementById(id).value.trim();
+        chrome.storage.local.set({ [id]: value }, () => {
+
+            // Show small "Saved!" animation
+            const indicator = document.getElementById('saveIndicator');
+            indicator.style.opacity = '1';
+            setTimeout(() => indicator.style.opacity = '0', 2000);
+
+            // If frequency changed, notify background script to update the alarm
+            if (id === 'syncFrequency') {
+                chrome.runtime.sendMessage({
+                    action: "update_alarm",
+                    frequency: parseInt(value, 10)
+                });
+            }
+        });
+    }
 
     inputs.forEach(id => {
-        document.getElementById(id).addEventListener('input', (e) => {
-            clearTimeout(timeoutId);
-            timeoutId = setTimeout(() => {
-                const value = e.target.value.trim();
-                chrome.storage.local.set({ [id]: value }, () => {
+        document.getElementById(id).addEventListener('input', () => {
+            clearTimeout(saveTimeouts[id]);
+            saveTimeouts[id] = setTimeout(() => persistField(id), 600); // 600ms debounce
+        });
+    });
 
-                    // Show small "Saved!" animation
-                    const indicator = document.getElementById('saveIndicator');
-                    indicator.style.opacity = '1';
-                    setTimeout(() => indicator.style.opacity = '0', 2000);
-
-                    // If frequency changed, notify background script to update the alarm
-                    if (id === 'syncFrequency') {
-                        chrome.runtime.sendMessage({
-                            action: "update_alarm",
-                            frequency: parseInt(value, 10)
-                        });
-                    }
-                });
-            }, 600); // 600ms debounce
+    // Flush any pending debounced save immediately once the popup loses focus,
+    // since it can be dismissed at any moment and a queued save would otherwise be lost.
+    window.addEventListener('blur', () => {
+        inputs.forEach(id => {
+            if (saveTimeouts[id]) {
+                clearTimeout(saveTimeouts[id]);
+                saveTimeouts[id] = null;
+                persistField(id);
+            }
         });
     });
 
@@ -172,8 +186,28 @@ document.addEventListener('DOMContentLoaded', async () => {
         const btn = document.getElementById(btnId);
         if (!btn) return;
 
-        btn.addEventListener('click', () => {
+        btn.addEventListener('click', async () => {
             const status = document.getElementById('status');
+            const serverUrl = document.getElementById('serverUrl').value.trim();
+
+            let origin;
+            try {
+                origin = new URL(serverUrl).origin + '/*';
+            } catch {
+                status.style.color = "#c0392b";
+                status.textContent = "Invalid server URL.";
+                setTimeout(() => { status.textContent = ''; }, 3500);
+                return;
+            }
+
+            const granted = await new Promise(resolve => chrome.permissions.request({ origins: [origin] }, resolve));
+            if (!granted) {
+                status.style.color = "#c0392b";
+                status.textContent = "Permission denied for this server.";
+                setTimeout(() => { status.textContent = ''; }, 3500);
+                return;
+            }
+
             status.style.color = activeColor;
             status.textContent = loadingText;
 

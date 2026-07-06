@@ -1,14 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Nextcloud Bookmark Sync",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Cross-browser bookmark synchronization via Nextcloud WebDAV.",
   "permissions": [
     "bookmarks",
     "storage",
     "alarms"
   ],
-  "host_permissions": [
+  "optional_host_permissions": [
     "https://*/*"
   ],
   "action": {

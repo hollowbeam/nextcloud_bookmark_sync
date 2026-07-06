@@ -23,6 +23,8 @@
 
 const SYNC_FOLDER_NAME = "🔄 Bookmark Sync";
 const ARCHIVE_FOLDER_NAME = "🗑️ Bookmark Archives";
+const LOCK_FILE_NAME = "bookmarks_sync.lock";
+const LOCK_STALE_MS = 5 * 60 * 1000; // Ignore locks older than this (crashed device safety net)
 
 let isSyncing = false;
 let syncTimeout = null;
@@ -31,18 +33,76 @@ let syncTimeout = null;
 // WEBDAV / NEXTCLOUD HELPER FUNCTIONS
 // ==========================================
 
+// Best-effort lock: a single well-known file next to bookmarks_sync.json.
+// Not a hard distributed mutex (no conditional PUT), but enough to stop two
+// devices from syncing at once for a personal, infrequent-sync use case.
 async function getActiveLocks(baseUrl, authHeader) {
-    // Your implementation to check .lock files via PROPFIND
-    return [];
+    const lockUrl = baseUrl + LOCK_FILE_NAME;
+
+    try {
+        const response = await fetch(lockUrl, {
+            method: 'GET',
+            credentials: 'omit',
+            headers: { 'Authorization': authHeader }
+        });
+
+        if (response.status === 404) return [];
+        if (!response.ok) return null;
+
+        const lock = await response.json();
+        if (!lock || !lock.owner || !lock.timestamp) return [];
+        if (Date.now() - lock.timestamp > LOCK_STALE_MS) return []; // Stale, ignore it
+
+        return [lock.owner];
+    } catch (error) {
+        console.error("Lock check failed:", error);
+        return null;
+    }
 }
 
 async function createLock(baseUrl, authHeader, extensionId) {
-    // Your implementation to create a .lock file via PUT
-    return "lockfile";
+    const lockUrl = baseUrl + LOCK_FILE_NAME;
+    const payload = JSON.stringify({ owner: extensionId, timestamp: Date.now() });
+
+    try {
+        const response = await fetch(lockUrl, {
+            method: 'PUT',
+            credentials: 'omit',
+            body: payload,
+            headers: {
+                'Authorization': authHeader,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.ok) return null;
+        return LOCK_FILE_NAME;
+    } catch (error) {
+        console.error("Lock creation failed:", error);
+        return null;
+    }
 }
 
 async function removeLock(baseUrl, authHeader, lockFile) {
-    // Your implementation to delete the .lock file via DELETE
+    if (!lockFile) return;
+    const lockUrl = baseUrl + lockFile;
+
+    try {
+        await fetch(lockUrl, {
+            method: 'DELETE',
+            credentials: 'omit',
+            headers: { 'Authorization': authHeader }
+        });
+    } catch (error) {
+        console.error("Lock removal failed:", error);
+    }
+}
+
+function toBase64Utf8(str) {
+    const bytes = new TextEncoder().encode(str);
+    let binary = '';
+    bytes.forEach(b => binary += String.fromCharCode(b));
+    return btoa(binary);
 }
 
 async function getBookmarksTreeAsync(folderId) {
@@ -123,7 +183,7 @@ async function getOrCreateArchiveFolder(targetParentId, targetIndex) {
 // ==========================================
 
 async function pushBookmarksToServer(sendResponse = () => {}) {
-    if (isSyncing) return;
+    if (isSyncing) return sendResponse({ status: "locked", message: "Sync already in progress." });
     isSyncing = true;
 
     chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId'], async (result) => {
@@ -134,7 +194,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
 
         const { serverUrl, username, password, extensionId } = result;
         const credentials = username + ':' + password;
-        const authHeader = 'Basic ' + btoa(unescape(encodeURIComponent(credentials)));
+        const authHeader = 'Basic ' + toBase64Utf8(credentials);
         const baseUrl = serverUrl.endsWith('/') ? serverUrl : serverUrl + '/';
         const fileUrl = baseUrl + 'bookmarks_sync.json';
 
@@ -173,6 +233,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
 // ==========================================
 
 async function pullBookmarksFromServer(sendResponse = () => {}) {
+    if (isSyncing) return sendResponse({ status: "locked", message: "Sync already in progress." });
     isSyncing = true;
 
     chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId'], async (result) => {
@@ -183,7 +244,7 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
 
         const { serverUrl, username, password, extensionId } = result;
         const credentials = username + ':' + password;
-        const authHeader = 'Basic ' + btoa(unescape(encodeURIComponent(credentials)));
+        const authHeader = 'Basic ' + toBase64Utf8(credentials);
         const baseUrl = serverUrl.endsWith('/') ? serverUrl : serverUrl + '/';
         const fileUrl = baseUrl + 'bookmarks_sync.json';
 
@@ -235,43 +296,45 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
                 return new Promise(resolve => chrome.bookmarks.getChildren(parentId, resolve));
             };
 
-            // Recursive two-way merge algorithm
+            // Recursive two-way merge algorithm.
+            // Matching uses a "claimed" set rather than plain find()/some() so that
+            // duplicate URLs/titles at the same level each match a distinct node
+            // instead of every remote entry collapsing onto the first local match.
             async function syncNodes(remoteNodes, localParentId) {
                 const localChildren = await getChildrenAsync(localParentId);
                 const safeRemoteNodes = remoteNodes || [];
+                const claimedIds = new Set();
+                const matches = (local, remote) => remote.url ? local.url === remote.url : (!local.url && local.title === remote.title);
 
                 for (const remoteNode of safeRemoteNodes) {
+                    const localMatch = localChildren.find(local => !claimedIds.has(local.id) && matches(local, remoteNode));
+
                     if (remoteNode.url) {
-                        const existsLocally = localChildren.some(local => local.url === remoteNode.url);
-                        if (!existsLocally) {
-                            await new Promise(resolve => chrome.bookmarks.create({ parentId: localParentId, title: remoteNode.title, url: remoteNode.url }, resolve));
+                        if (localMatch) {
+                            claimedIds.add(localMatch.id);
+                        } else {
+                            const created = await new Promise(resolve => chrome.bookmarks.create({ parentId: localParentId, title: remoteNode.title, url: remoteNode.url }, resolve));
+                            claimedIds.add(created.id);
                             addedCount++;
                         }
                     } else {
-                        let existingFolder = localChildren.find(local => !local.url && local.title === remoteNode.title);
                         let targetFolderId;
-
-                        if (existingFolder) {
-                            targetFolderId = existingFolder.id;
+                        if (localMatch) {
+                            targetFolderId = localMatch.id;
+                            claimedIds.add(localMatch.id);
                         } else {
                             const newFolder = await new Promise(resolve => chrome.bookmarks.create({ parentId: localParentId, title: remoteNode.title }, resolve));
                             targetFolderId = newFolder.id;
+                            claimedIds.add(targetFolderId);
                         }
                         await syncNodes(remoteNode.children || [], targetFolderId);
                     }
                 }
 
-                for (const localNode of localChildren) {
-                    let existsOnServer = false;
-
-                    if (localNode.url) {
-                        existsOnServer = safeRemoteNodes.some(remote => remote.url === localNode.url);
-                    } else {
-                        existsOnServer = safeRemoteNodes.some(remote => !remote.url && remote.title === localNode.title);
-                    }
-
-                    if (!existsOnServer) {
-                        const archiveFolderId = await getOrCreateArchiveFolder(rootParentId, rootIndex + 1);
+                const toArchive = localChildren.filter(local => !claimedIds.has(local.id));
+                if (toArchive.length > 0) {
+                    const archiveFolderId = await getOrCreateArchiveFolder(rootParentId, rootIndex + 1);
+                    for (const localNode of toArchive) {
                         await new Promise(resolve => {
                             chrome.bookmarks.move(localNode.id, { parentId: archiveFolderId }, resolve);
                         });
@@ -280,18 +343,14 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
                 }
 
                 const freshLocalChildren = await getChildrenAsync(localParentId);
+                const usedForOrder = new Set();
 
                 for (let i = 0; i < safeRemoteNodes.length; i++) {
                     const remoteNode = safeRemoteNodes[i];
-
-                    let targetLocalNode;
-                    if (remoteNode.url) {
-                        targetLocalNode = freshLocalChildren.find(local => local.url === remoteNode.url);
-                    } else {
-                        targetLocalNode = freshLocalChildren.find(local => !local.url && local.title === remoteNode.title);
-                    }
+                    const targetLocalNode = freshLocalChildren.find(local => !usedForOrder.has(local.id) && matches(local, remoteNode));
 
                     if (targetLocalNode) {
+                        usedForOrder.add(targetLocalNode.id);
                         await new Promise(resolve => {
                             chrome.bookmarks.move(targetLocalNode.id, { parentId: localParentId, index: i }, resolve);
                         });

@@ -11,7 +11,7 @@ Say goodbye to Big Tech's cloud services. Keep your bookmarks perfectly synced a
 * **🗑️ Smart Archive System:** Deleted bookmarks are never truly lost. They are safely moved to a "🗑️ Bookmark Archives" folder, which intelligently positions itself right next to your sync folder.
 * **♻️ Auto-Cleanup Retention:** Archives are neatly organized into sub-folders by date (`YYYY-MM-DD`). A daily background task automatically cleans up archives older than your custom retention limit (1 to 30 days).
 * **🎯 Exact Ordering & Strict Matching:** Bookmarks are matched purely by URL across different browser engines (solving local ID mismatch issues). Their exact visual order is also perfectly replicated everywhere.
-* **🛡️ Smart Collision Protection:** Uses a custom Mutex lock mechanism (`.lock` files) via WebDAV to ensure your data is never corrupted, even if two browsers try to sync at the exact same millisecond.
+* **🛡️ Collision Protection:** Uses a lock file (`bookmarks_sync.lock`) via WebDAV so that a device backs off with a "locked" status if another device is already syncing, instead of silently overwriting its data. It's a best-effort lock (not an atomic distributed mutex) with a 5-minute staleness timeout, so a crashed device can never leave sync permanently blocked.
 * **⚡ Native Integration:** Creates a dedicated "🔄 Bookmark Sync" folder right in your Bookmarks Bar for easy, isolated access.
 
 ## 📋 Prerequisites
@@ -53,6 +53,8 @@ Before using this extension, you will need:
 
 *After the initial setup, the extension will handle syncing automatically in the background.*
 
+> **Note:** The extension only ever requests access to the one Nextcloud domain you configure (not to every website). The very first click of **Export** or **Import** triggers a one-time browser permission prompt for that domain — accept it so the automatic background sync can reach your server afterwards.
+
 ## 🛠️ How it Works (Under the Hood)
 
 * **Push (Export):** When you add, delete, edit, or move a bookmark inside the `🔄 Bookmark Sync` folder, a 5-second debounce timer starts. Once the timer finishes, the extension locks the remote file and uploads a fresh `bookmarks_sync.json` via a `PUT` request.
@@ -60,6 +62,7 @@ Before using this extension, you will need:
   1. **Add** missing items locally.
   2. **Archive** local items that were deleted on the server.
   3. **Reorder** all elements to exactly match the server's layout.
+* **Cross-browser background page:** `manifest.json` declares both `service_worker` and `scripts` under `background`. Chrome/Brave/Edge use the `service_worker` entry; Firefox, whose Manifest V3 background model doesn't run a real service worker, falls back to `scripts`. Both point at the same `background.js`.
 
 ## 🤝 Contributing
 
