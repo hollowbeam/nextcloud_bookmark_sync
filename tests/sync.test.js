@@ -575,7 +575,8 @@ test('pull: keeps local changes not exported yet, then schedules an export', asy
 test('pull: archives what the other device deleted, applies its renames', async () => {
     const state = { remote: { title: 'root', children: [bm('A2', 'https://a.example/')] } };
     const { b, id } = await deviceWith(state, [bm('A'), bm('B')], [bm('A'), bm('B')]);
-    await b.call('pullBookmarksFromServer');
+    const res = await b.call('pullBookmarksFromServer');
+    assert.strictEqual(res.message, '0 items imported! (1 renamed)');
     await b.flush();
     assert.deepStrictEqual(b.titlesIn(id), ['A2']);
     assert.ok(!b.timers.some(t => t.ms === 5000), 'useless export scheduled');

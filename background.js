@@ -368,6 +368,7 @@ async function applyTreeToLocal(syncFolderId, targetNodes) {
     const rootIndex = syncFolderInfo[0].index;
 
     let addedCount = 0;
+    let renamedCount = 0;
     const skipped = new Set(); // Target nodes the browser refused to create
 
     const getChildrenAsync = (parentId) => {
@@ -404,6 +405,7 @@ async function applyTreeToLocal(syncFolderId, targetNodes) {
                     claimedIds.add(localMatch.id);
                     if (localMatch.title !== remoteNode.title) {
                         await new Promise(resolve => chrome.bookmarks.update(localMatch.id, { title: remoteNode.title }, resolve));
+                        renamedCount++;
                     }
                 } else {
                     const created = await createNodeAsync({ parentId: localParentId, title: remoteNode.title, url: remoteNode.url }, remoteNode);
@@ -456,7 +458,7 @@ async function applyTreeToLocal(syncFolderId, targetNodes) {
     }
 
     await syncNodes(targetNodes, syncFolderId);
-    return { addedCount, skippedCount: skipped.size, skipped };
+    return { addedCount, renamedCount, skippedCount: skipped.size, skipped };
 }
 
 // ==========================================
@@ -602,13 +604,16 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             const base = (await loadSyncBase(fileUrl)) || local.children;
             const target = mergeChildren(base, local.children, remote.tree.children);
 
-            const { addedCount, skippedCount, skipped } = await applyTreeToLocal(syncFolderId, target);
+            const { addedCount, renamedCount, skippedCount, skipped } = await applyTreeToLocal(syncFolderId, target);
             await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped));
 
             isSyncing = false;
-            const skippedNote = skippedCount > 0 ? ` (${skippedCount} skipped)` : '';
+            const notes = [];
+            if (renamedCount > 0) notes.push(`${renamedCount} renamed`);
+            if (skippedCount > 0) notes.push(`${skippedCount} skipped`);
+            const notesText = notes.length > 0 ? ` (${notes.join(', ')})` : '';
             const itemWord = addedCount === 1 ? "item" : "items";
-            sendResponse({ status: "success", message: `${addedCount} ${itemWord} imported!${skippedNote}` });
+            sendResponse({ status: "success", message: `${addedCount} ${itemWord} imported!${notesText}` });
 
             // Kept local changes still have to reach the server
             if (!sameTree(target, remote.tree.children)) scheduleAutomaticPush();
