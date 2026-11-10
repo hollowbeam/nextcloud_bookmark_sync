@@ -661,7 +661,12 @@ async function cleanOldArchives() {
 function armAutomaticPush() {
     if (syncTimeout) clearTimeout(syncTimeout);
 
-    syncTimeout = setTimeout(() => {
+    syncTimeout = setTimeout(async () => {
+        syncTimeout = null;
+        // Auto-sync may have been turned off since this export was scheduled
+        const { autoSyncEnabled } = await new Promise(resolve => chrome.storage.local.get(['autoSyncEnabled'], resolve));
+        if (autoSyncEnabled === false) return;
+
         // A held lock (local sync or another device) must delay this export, not drop it
         pushBookmarksToServer((response) => {
             if (response.status !== "locked") return;
@@ -703,6 +708,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
         } else {
             chrome.alarms.clear("autoPullAlarm");
+            // Cancels an export already scheduled by a recent bookmark change
+            if (syncTimeout) {
+                clearTimeout(syncTimeout);
+                syncTimeout = null;
+            }
         }
         sendResponse({ status: "success" });
     } else if (request.action === "update_alarm") {

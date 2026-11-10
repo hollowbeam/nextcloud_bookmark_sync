@@ -258,6 +258,18 @@ test('auto-push: an export fired during a local import is retried, not dropped',
     assert.ok(b.log.includes('PUT bookmarks_sync.json'));
 });
 
+test('auto-push: an export scheduled before auto-sync was turned off does not run', async () => {
+    const b = loadBackground(noLock);
+    await b.seed();
+    b.sandbox.scheduleAutomaticPush();
+    await b.flush();
+    assert.strictEqual(b.timers.length, 1);
+    b.store.autoSyncEnabled = false;
+    await b.timers[0].fn();
+    await b.flush();
+    assert.deepStrictEqual(b.log, []);
+});
+
 test('auto-push: bookmark events during an import schedule nothing', async () => {
     const state = { remote: { children: [] } };
     const b = loadBackground(davServer(state));
