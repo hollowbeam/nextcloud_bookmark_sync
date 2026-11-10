@@ -607,7 +607,8 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
 
             isSyncing = false;
             const skippedNote = skippedCount > 0 ? ` (${skippedCount} skipped)` : '';
-            sendResponse({ status: "success", message: `${addedCount} items imported!${skippedNote}` });
+            const itemWord = addedCount === 1 ? "item" : "items";
+            sendResponse({ status: "success", message: `${addedCount} ${itemWord} imported!${skippedNote}` });
 
             // Kept local changes still have to reach the server
             if (!sameTree(target, remote.tree.children)) scheduleAutomaticPush();

@@ -309,7 +309,7 @@ test('pull: plain message when nothing is skipped, lock released after the delay
     await b.seed();
     const res = await b.call('pullBookmarksFromServer');
     await b.flush();
-    assert.strictEqual(res.message, '1 items imported!');
+    assert.strictEqual(res.message, '1 item imported!');
     const removal = b.timers.find(t => t.ms === 2000);
     assert.ok(removal, 'lock removal not scheduled');
     await removal.fn();
