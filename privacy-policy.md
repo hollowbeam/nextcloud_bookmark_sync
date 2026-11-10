@@ -1,6 +1,6 @@
 # Privacy Policy for Nextcloud Bookmark Sync
 
-Effective Date: March 30, 2026
+Effective Date: November 10, 2026
 
 Nextcloud Bookmark Sync ("the Extension") was built from the ground up with a strict privacy-first philosophy. This policy explains how your data is handled.
 
@@ -8,7 +8,7 @@ Nextcloud Bookmark Sync ("the Extension") was built from the ground up with a st
 The developer of this Extension does not collect, store, access, or transmit any of your personal data, browsing history, or bookmarks. We do not operate any intermediary servers.
 
 2. How Your Data is Handled
-All configurations—including your Nextcloud WebDAV URL, username, and app password—are stored exclusively on your local device using the browser's secure local storage API.
+All configurations—including your Nextcloud WebDAV URL, username, and app password—are stored exclusively on your local device using the browser's extension storage. Since version 1.6.0, the Extension also keeps there a copy of the synced folder as of the last successful sync (bookmark titles, URLs and folder structure only), used to merge changes from several devices. This copy never leaves your device.
 
 3. Data Transmission
 Synchronization occurs directly and securely (via HTTPS) between your local browser and the specific Nextcloud server you configure in the settings. Your bookmarks are never routed through any third-party services.
