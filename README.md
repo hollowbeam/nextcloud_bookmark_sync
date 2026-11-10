@@ -69,6 +69,8 @@ Before using this extension, you will need:
 Contributions, issues, and feature requests are highly encouraged!
 If you find a bug or have an idea for an improvement, feel free to open an issue or submit a pull request. Let's build a better, decentralized sync tool together.
 
+Before submitting a pull request, run the tests (Node.js 22 or later, no dependencies): `node --test tests/`. They load `background.js` and `popup.js` with mocked browser and WebDAV APIs, and run automatically on every pull request.
+
 ## 📄 License
 
 This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
