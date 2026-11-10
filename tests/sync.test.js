@@ -162,6 +162,32 @@ test('push: backs off without writing when another device holds the lock', async
     assert.deepStrictEqual(b.log, ['GET bookmarks_sync.lock']);
 });
 
+test("push: Nextcloud's own file lock (423) reads as busy, so the automatic export retries", async () => {
+    const b = loadBackground((url, opts) => url === LOCK_URL && opts.method === 'GET' ? { status: 423 } : noLock(url, opts));
+    await b.seed();
+    const res = await b.call('pushBookmarksToServer');
+    assert.strictEqual(res.status, 'locked');
+    assert.deepStrictEqual(b.log, ['GET bookmarks_sync.lock']);
+});
+
+test('lock removal is retried while Nextcloud answers 423', async () => {
+    let deletes = 0;
+    const b = loadBackground((url, opts) => {
+        if (url === LOCK_URL && opts.method === 'DELETE') return { status: ++deletes < 3 ? 423 : 204 };
+        return noLock(url, opts);
+    });
+    await b.seed();
+    assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
+    for (const ms of [500, 1000]) {
+        await b.flush();
+        const wait = b.timers.find(t => t.ms === ms);
+        assert.ok(wait, `no retry after ${ms} ms`);
+        wait.fn();
+    }
+    await b.flush();
+    assert.strictEqual(deletes, 3);
+});
+
 test('push: releases the lock even when the upload fails', async () => {
     const b = loadBackground((url, opts) => {
         if (url === LOCK_URL && opts.method === 'GET') return { status: 404 };

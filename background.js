@@ -49,6 +49,8 @@ async function getActiveLocks(baseUrl, authHeader) {
         });
 
         if (response.status === 404) return [];
+        // Nextcloud's own file locking: another device is writing right now
+        if (response.status === 423) return ['nextcloud-file-lock'];
         if (!response.ok) return null;
 
         const lock = await response.json();
@@ -89,15 +91,23 @@ async function removeLock(baseUrl, authHeader, lockFile) {
     if (!lockFile) return;
     const lockUrl = baseUrl + lockFile;
 
-    try {
-        await fetch(lockUrl, {
-            method: 'DELETE',
-            credentials: 'omit',
-            headers: { 'Authorization': authHeader }
-        });
-    } catch (error) {
-        console.error("Lock removal failed:", error);
+    // Nextcloud answers 423 while another device is reading the file: retry, or the
+    // lock would block every other device until it goes stale (5 minutes)
+    for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+            const response = await fetch(lockUrl, {
+                method: 'DELETE',
+                credentials: 'omit',
+                headers: { 'Authorization': authHeader }
+            });
+            if (response.status !== 423) return;
+        } catch (error) {
+            console.error("Lock removal failed:", error);
+            return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
     }
+    console.error("Lock removal failed: file still locked by the server.");
 }
 
 // Checks for another device's lock, then takes ours.
