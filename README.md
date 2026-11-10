@@ -11,7 +11,8 @@ Say goodbye to Big Tech's cloud services. Keep your bookmarks perfectly synced a
 * **🗑️ Smart Archive System:** Deleted bookmarks are never truly lost. They are safely moved to a "🗑️ Bookmark Archives" folder, which intelligently positions itself right next to your sync folder.
 * **♻️ Auto-Cleanup Retention:** Archives are neatly organized into sub-folders by date (`YYYY-MM-DD`). A daily background task automatically cleans up archives older than your custom retention limit (1 to 30 days).
 * **🎯 Exact Ordering & Strict Matching:** Bookmarks are matched purely by URL across different browser engines (solving local ID mismatch issues). Their exact visual order is also perfectly replicated everywhere.
-* **🛡️ Collision Protection:** Uses a lock file (`bookmarks_sync.lock`) via WebDAV so that a device backs off with a "locked" status if another device is already syncing, and automatic exports are retried afterwards. It's a best-effort lock (not an atomic distributed mutex) with a 5-minute staleness timeout, so a crashed device can never leave sync permanently blocked. It only prevents simultaneous syncs: exports aren't merged, so the last device to export replaces the remote file.
+* **🛡️ Collision Protection:** Uses a lock file (`bookmarks_sync.lock`) via WebDAV so that a device backs off with a "locked" status if another device is already syncing, and automatic exports are retried afterwards. It's a best-effort lock (not an atomic distributed mutex) with a 5-minute staleness timeout, so a crashed device can never leave sync permanently blocked.
+* **🔀 Concurrent Changes Merged:** Each device remembers the folder as of its last sync. If another device exported in the meantime, changes from both sides are merged (additions kept, deletions and renames applied) instead of the last export replacing the other's. The upload is conditional (`If-Match` on the file's ETag), so a write that slips in between is detected and retried rather than overwritten.
 * **⚡ Native Integration:** Creates a dedicated "🔄 Bookmark Sync" folder right in your Bookmarks Bar for easy, isolated access.
 
 ## 📋 Prerequisites
@@ -57,11 +58,15 @@ Before using this extension, you will need:
 
 ## 🛠️ How it Works (Under the Hood)
 
-* **Push (Export):** When you add, delete, edit, or move a bookmark inside the `🔄 Bookmark Sync` folder, a 5-second debounce timer starts. Once the timer finishes, the extension locks the remote file and uploads a fresh `bookmarks_sync.json` via a `PUT` request.
-* **Pull (Import):** The background service worker wakes up every X minutes (via `chrome.alarms`), checks for a lock, and downloads the JSON file via a `GET` request. It then executes a rigorous 3-step merge:
-  1. **Add** missing items locally. An entry the browser refuses (not a valid URL, e.g. after a hand edit of the JSON) is skipped and counted in the import message instead of aborting the import.
-  2. **Archive** local items that were deleted on the server.
-  3. **Reorder** all elements to exactly match the server's layout.
+* **Sync base:** After each successful export or import, the extension stores the folder content it agreed on with the server (titles, URLs and structure only) in the browser's local extension storage. Comparing the local folder and the server file against this base tells an addition on one side apart from a deletion on the other. A bookmark is identified by its URL, a folder by its title; renaming a folder counts as deleting it and adding a new one. The base is tied to the server URL. Without one (first sync on a device, or a new server URL), an import lets the server win, as in earlier versions (local-only items go to the archive), while an export keeps both sides. When updating from 1.5.1 or earlier, the folder as it is at update time becomes the base.
+* **Push (Export):** When you add, delete, edit, or move a bookmark inside the `🔄 Bookmark Sync` folder, a 5-second debounce timer starts. Once the timer finishes, the extension locks the remote file and downloads it. If it is unchanged since the base, the local folder is uploaded as is; otherwise both sides are merged, the merge is applied locally, and the merged result is uploaded. The `PUT` carries `If-Match` with the ETag just read (`If-None-Match: *` for the very first export); a `412` response means another device wrote in between, and the export is retried.
+* **Pull (Import):** The background service worker wakes up every X minutes (via `chrome.alarms`), checks for a lock, downloads the JSON file via a `GET` request, merges it with the local folder against the base, and applies the result in 3 steps:
+  1. **Add** missing items locally and apply renames (both counted in the import message). An entry the browser refuses (not a valid URL, e.g. after a hand edit of the JSON) is skipped and counted in the import message instead of aborting the import. It stays on the server for the devices that accept it.
+  2. **Archive** local items that were deleted on another device.
+  3. **Reorder** all elements to match the server's layout (or keep the local order if only this device reordered); additions keep their place before their next sibling.
+
+  Local changes not exported yet are kept rather than archived, and an export is scheduled afterwards to send them.
+* **Devices on older versions** (1.5.1 and earlier) still upload their whole folder without merging, and mirror the server on import. Update every device to get the full protection.
 * **Cross-browser background page:** `manifest.json` declares both `service_worker` and `scripts` under `background`. Chrome/Brave/Edge use the `service_worker` entry; Firefox, whose Manifest V3 background model doesn't run a real service worker, falls back to `scripts`. Both point at the same `background.js`.
 
 ## 🤝 Contributing
