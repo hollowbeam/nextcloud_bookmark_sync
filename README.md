@@ -11,7 +11,7 @@ Say goodbye to Big Tech's cloud services. Keep your bookmarks perfectly synced a
 * **🗑️ Smart Archive System:** Deleted bookmarks are never truly lost. They are safely moved to a "🗑️ Bookmark Archives" folder, which intelligently positions itself right next to your sync folder.
 * **♻️ Auto-Cleanup Retention:** Archives are neatly organized into sub-folders by date (`YYYY-MM-DD`). A daily background task automatically cleans up archives older than your custom retention limit (1 to 30 days).
 * **🎯 Exact Ordering & Strict Matching:** Bookmarks are matched purely by URL across different browser engines (solving local ID mismatch issues). Their exact visual order is also perfectly replicated everywhere.
-* **🛡️ Collision Protection:** Uses a lock file (`bookmarks_sync.lock`) via WebDAV so that a device backs off with a "locked" status if another device is already syncing, instead of silently overwriting its data. It's a best-effort lock (not an atomic distributed mutex) with a 5-minute staleness timeout, so a crashed device can never leave sync permanently blocked.
+* **🛡️ Collision Protection:** Uses a lock file (`bookmarks_sync.lock`) via WebDAV so that a device backs off with a "locked" status if another device is already syncing, and automatic exports are retried afterwards. It's a best-effort lock (not an atomic distributed mutex) with a 5-minute staleness timeout, so a crashed device can never leave sync permanently blocked. It only prevents simultaneous syncs: exports aren't merged, so the last device to export replaces the remote file.
 * **⚡ Native Integration:** Creates a dedicated "🔄 Bookmark Sync" folder right in your Bookmarks Bar for easy, isolated access.
 
 ## 📋 Prerequisites
@@ -42,7 +42,7 @@ Before using this extension, you will need:
 1. Click on the **Nextcloud Bookmark Sync** icon in your browser toolbar.
 2. You can quickly pause or resume background syncing using the **Auto-sync toggle** on the main screen.
 3. Click the **Gear icon** (⚙️) to open the Settings view and fill in your details:
-   * **Target Folder URL:** Your Nextcloud WebDAV path.
+   * **Target Folder URL:** Your Nextcloud WebDAV path. It must start with `https://`: your credentials are sent with every sync.
    * **Username:** Your Nextcloud username.
    * **App Password:** The app password you generated in Nextcloud.
    * **Auto-Sync Frequency:** Choose how often the background script should check for updates.
@@ -59,7 +59,7 @@ Before using this extension, you will need:
 
 * **Push (Export):** When you add, delete, edit, or move a bookmark inside the `🔄 Bookmark Sync` folder, a 5-second debounce timer starts. Once the timer finishes, the extension locks the remote file and uploads a fresh `bookmarks_sync.json` via a `PUT` request.
 * **Pull (Import):** The background service worker wakes up every X minutes (via `chrome.alarms`), checks for a lock, and downloads the JSON file via a `GET` request. It then executes a rigorous 3-step merge:
-  1. **Add** missing items locally.
+  1. **Add** missing items locally. An entry the browser refuses (not a valid URL, e.g. after a hand edit of the JSON) is skipped and counted in the import message instead of aborting the import.
   2. **Archive** local items that were deleted on the server.
   3. **Reorder** all elements to exactly match the server's layout.
 * **Cross-browser background page:** `manifest.json` declares both `service_worker` and `scripts` under `background`. Chrome/Brave/Edge use the `service_worker` entry; Firefox, whose Manifest V3 background model doesn't run a real service worker, falls back to `scripts`. Both point at the same `background.js`.

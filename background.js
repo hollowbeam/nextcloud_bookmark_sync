@@ -28,6 +28,7 @@ const LOCK_STALE_MS = 5 * 60 * 1000; // Ignore locks older than this (crashed de
 
 let isSyncing = false;
 let syncTimeout = null;
+let pendingLockRemoval = null;
 
 // ==========================================
 // WEBDAV / NEXTCLOUD HELPER FUNCTIONS
@@ -50,7 +51,7 @@ async function getActiveLocks(baseUrl, authHeader) {
         if (!response.ok) return null;
 
         const lock = await response.json();
-        if (!lock || !lock.owner || !lock.timestamp) return [];
+        if (!lock || typeof lock.owner !== 'string' || !lock.owner || !lock.timestamp) return [];
         if (Date.now() - lock.timestamp > LOCK_STALE_MS) return []; // Stale, ignore it
 
         return [lock.owner];
@@ -96,6 +97,27 @@ async function removeLock(baseUrl, authHeader, lockFile) {
     } catch (error) {
         console.error("Lock removal failed:", error);
     }
+}
+
+// Checks for another device's lock, then takes ours.
+// Returns { lockFile } on success, or { status, message } when the sync must not proceed.
+async function acquireLock(baseUrl, authHeader, extensionId) {
+    const activeLocks = await getActiveLocks(baseUrl, authHeader);
+    if (activeLocks === null) return { status: "error", message: "Server error." };
+
+    const otherLocks = activeLocks.filter(lock => !lock.startsWith(extensionId));
+    if (otherLocks.length > 0) return { status: "locked", message: "Another device is syncing." };
+
+    const lockFile = await createLock(baseUrl, authHeader, extensionId);
+    if (!lockFile) return { status: "error", message: "Lock failed." };
+
+    // The lock we just wrote replaces the previous pull's: its delayed removal would delete ours
+    if (pendingLockRemoval) {
+        clearTimeout(pendingLockRemoval);
+        pendingLockRemoval = null;
+    }
+
+    return { lockFile };
 }
 
 function toBase64Utf8(str) {
@@ -187,7 +209,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
     isSyncing = true;
 
     chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId'], async (result) => {
-        if (!result.serverUrl || !result.username || !result.password) {
+        if (!result.serverUrl || !result.username || !result.password || !result.extensionId) {
             isSyncing = false;
             return sendResponse({ status: "error", message: "Missing credentials." });
         }
@@ -198,7 +220,13 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
         const baseUrl = serverUrl.endsWith('/') ? serverUrl : serverUrl + '/';
         const fileUrl = baseUrl + 'bookmarks_sync.json';
 
+        let myLockFile = null;
+
         try {
+            const lock = await acquireLock(baseUrl, authHeader, extensionId);
+            if (!lock.lockFile) return sendResponse({ status: lock.status, message: lock.message });
+            myLockFile = lock.lockFile;
+
             const syncFolderId = await getOrCreateSyncFolder();
             if (!syncFolderId) throw new Error("Could not create Sync Folder.");
 
@@ -223,6 +251,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             console.error("PUSH Error:", error);
             sendResponse({ status: "error", message: "Export failed." });
         } finally {
+            await removeLock(baseUrl, authHeader, myLockFile);
             isSyncing = false;
         }
     });
@@ -248,23 +277,12 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
         const baseUrl = serverUrl.endsWith('/') ? serverUrl : serverUrl + '/';
         const fileUrl = baseUrl + 'bookmarks_sync.json';
 
-        const activeLocks = await getActiveLocks(baseUrl, authHeader);
-        if (activeLocks === null) {
+        const lock = await acquireLock(baseUrl, authHeader, extensionId);
+        if (!lock.lockFile) {
             isSyncing = false;
-            return sendResponse({ status: "error", message: "Server error." });
+            return sendResponse({ status: lock.status, message: lock.message });
         }
-
-        const otherLocks = activeLocks.filter(lock => !lock.startsWith(extensionId));
-        if (otherLocks.length > 0) {
-            isSyncing = false;
-            return sendResponse({ status: "locked", message: "Another device is syncing." });
-        }
-
-        const myLockFile = await createLock(baseUrl, authHeader, extensionId);
-        if (!myLockFile) {
-            isSyncing = false;
-            return sendResponse({ status: "error", message: "Lock failed." });
-        }
+        const myLockFile = lock.lockFile;
 
         try {
             const response = await fetch(fileUrl, {
@@ -291,9 +309,23 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             const rootIndex = syncFolderInfo[0].index;
 
             let addedCount = 0;
+            let skippedCount = 0;
 
             const getChildrenAsync = (parentId) => {
                 return new Promise(resolve => chrome.bookmarks.getChildren(parentId, resolve));
+            };
+
+            // The browser refuses entries that aren't valid URLs (e.g. a hand-edited JSON).
+            // Resolves to null in that case so one bad entry doesn't abort the whole import.
+            const createNodeAsync = (details) => {
+                return new Promise(resolve => chrome.bookmarks.create(details, (node) => {
+                    if (chrome.runtime.lastError || !node) {
+                        console.warn(`Skipped "${details.title}":`, chrome.runtime.lastError);
+                        skippedCount++;
+                        return resolve(null);
+                    }
+                    resolve(node);
+                }));
             };
 
             // Recursive two-way merge algorithm.
@@ -313,9 +345,11 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
                         if (localMatch) {
                             claimedIds.add(localMatch.id);
                         } else {
-                            const created = await new Promise(resolve => chrome.bookmarks.create({ parentId: localParentId, title: remoteNode.title, url: remoteNode.url }, resolve));
-                            claimedIds.add(created.id);
-                            addedCount++;
+                            const created = await createNodeAsync({ parentId: localParentId, title: remoteNode.title, url: remoteNode.url });
+                            if (created) {
+                                claimedIds.add(created.id);
+                                addedCount++;
+                            }
                         }
                     } else {
                         let targetFolderId;
@@ -323,7 +357,8 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
                             targetFolderId = localMatch.id;
                             claimedIds.add(localMatch.id);
                         } else {
-                            const newFolder = await new Promise(resolve => chrome.bookmarks.create({ parentId: localParentId, title: remoteNode.title }, resolve));
+                            const newFolder = await createNodeAsync({ parentId: localParentId, title: remoteNode.title });
+                            if (!newFolder) continue;
                             targetFolderId = newFolder.id;
                             claimedIds.add(targetFolderId);
                         }
@@ -344,15 +379,16 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
 
                 const freshLocalChildren = await getChildrenAsync(localParentId);
                 const usedForOrder = new Set();
+                let position = 0; // Not the remote index: skipped nodes must not leave gaps
 
-                for (let i = 0; i < safeRemoteNodes.length; i++) {
-                    const remoteNode = safeRemoteNodes[i];
+                for (const remoteNode of safeRemoteNodes) {
                     const targetLocalNode = freshLocalChildren.find(local => !usedForOrder.has(local.id) && matches(local, remoteNode));
 
                     if (targetLocalNode) {
                         usedForOrder.add(targetLocalNode.id);
+                        const index = position++;
                         await new Promise(resolve => {
-                            chrome.bookmarks.move(targetLocalNode.id, { parentId: localParentId, index: i }, resolve);
+                            chrome.bookmarks.move(targetLocalNode.id, { parentId: localParentId, index }, resolve);
                         });
                     }
                 }
@@ -361,14 +397,18 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             await syncNodes(remoteFolderData.children || [], syncFolderId);
 
             isSyncing = false;
-            sendResponse({ status: "success", message: `${addedCount} items imported!` });
+            const skippedNote = skippedCount > 0 ? ` (${skippedCount} skipped)` : '';
+            sendResponse({ status: "success", message: `${addedCount} items imported!${skippedNote}` });
 
         } catch (error) {
             console.error("PULL Error:", error);
             isSyncing = false;
             sendResponse({ status: "error", message: "Import crashed." });
         } finally {
-            setTimeout(async () => { await removeLock(baseUrl, authHeader, myLockFile); }, 2000);
+            pendingLockRemoval = setTimeout(async () => {
+                pendingLockRemoval = null;
+                await removeLock(baseUrl, authHeader, myLockFile);
+            }, 2000);
         }
     });
 }
@@ -405,16 +445,27 @@ async function cleanOldArchives() {
 // AUTOMATIC TRIGGER & DEBOUNCING
 // ==========================================
 
+function armAutomaticPush() {
+    if (syncTimeout) clearTimeout(syncTimeout);
+
+    syncTimeout = setTimeout(() => {
+        // A held lock (local sync or another device) must delay this export, not drop it
+        pushBookmarksToServer((response) => {
+            if (response.status !== "locked") return;
+
+            chrome.storage.local.get(['autoSyncEnabled'], (result) => {
+                if (result.autoSyncEnabled !== false) armAutomaticPush();
+            });
+        });
+    }, 5000);
+}
+
 function scheduleAutomaticPush() {
     chrome.storage.local.get(['autoSyncEnabled'], (result) => {
         if (result.autoSyncEnabled === false) return;
-        if (isSyncing) return;
+        if (isSyncing) return; // Ignores the bookmark events caused by an import
 
-        if (syncTimeout) clearTimeout(syncTimeout);
-
-        syncTimeout = setTimeout(() => {
-            pushBookmarksToServer();
-        }, 5000);
+        armAutomaticPush();
     });
 }
 

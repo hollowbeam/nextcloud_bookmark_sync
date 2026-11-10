@@ -190,15 +190,23 @@ document.addEventListener('DOMContentLoaded', async () => {
             const status = document.getElementById('status');
             const serverUrl = document.getElementById('serverUrl').value.trim();
 
-            let origin;
+            let parsedUrl = null;
             try {
-                origin = new URL(serverUrl).origin + '/*';
+                parsedUrl = new URL(serverUrl);
             } catch {
+                // Reported below, with the other invalid URLs
+            }
+
+            // The manifest only allows https hosts
+            if (!parsedUrl || parsedUrl.protocol !== 'https:') {
                 status.style.color = "#c0392b";
-                status.textContent = "Invalid server URL.";
+                status.textContent = parsedUrl ? "Server URL must use https." : "Invalid server URL.";
                 setTimeout(() => { status.textContent = ''; }, 3500);
                 return;
             }
+
+            // Hostname rather than origin: Firefox match patterns don't support ports
+            const origin = `https://${parsedUrl.hostname}/*`;
 
             const granted = await new Promise(resolve => chrome.permissions.request({ origins: [origin] }, resolve));
             if (!granted) {
