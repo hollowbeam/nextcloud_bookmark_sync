@@ -1,6 +1,6 @@
 'use strict';
 // Runs background.js and popup.js in a Node vm with mocked browser and WebDAV APIs.
-// Run with: node --test tests/
+// Run with: node --test
 const { test } = require('node:test');
 const fs = require('fs');
 const path = require('path');
