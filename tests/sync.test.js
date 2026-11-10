@@ -497,14 +497,49 @@ test('push: a base saved for another server is ignored', async () => {
     assert.deepStrictEqual(b.titlesIn(id), ['A', 'Z']);
 });
 
-test('push: without a base the server wins, local-only items are archived', async () => {
+test('push: without a base both sides are kept (fresh install exporting its bookmarks)', async () => {
     const state = { remote: { title: 'root', children: [bm('A'), bm('R')] } };
     const { b, id } = await deviceWith(state, null, [bm('A'), bm('X')]);
     const res = await b.call('pushBookmarksToServer');
     await b.flush();
     assert.strictEqual(res.status, 'success', res.message);
-    assert.deepStrictEqual(b.titlesIn(id), ['A', 'R']);
-    assert.deepStrictEqual(titles(state.remote.children), ['A', 'R']);
+    assert.deepStrictEqual(b.titlesIn(id), ['A', 'R', 'X']);
+    assert.deepStrictEqual(titles(state.remote.children), ['A', 'R', 'X']);
+});
+
+test('lock: an unreadable lock file is ignored instead of blocking every device', async () => {
+    const state = { remote: null };
+    const server = davServer(state);
+    const b = loadBackground((url, opts) => (url === LOCK_URL && opts.method === 'GET') ? { status: 200, body: undefined } : server(url, opts));
+    const id = await b.seed();
+    await b.addLocal(id, 'A', bm('A').url);
+    // response.json() rejects, as on an empty or truncated file
+    b.sandbox.fetch = ((orig) => async (u, o) => {
+        const r = await orig(u, o);
+        if (u === LOCK_URL && (o.method || 'GET') === 'GET') r.json = async () => { throw new SyntaxError('Unexpected end of JSON input'); };
+        return r;
+    })(b.sandbox.fetch);
+    const res = await b.call('pushBookmarksToServer');
+    assert.strictEqual(res.status, 'success', res.message);
+});
+
+test("lock: Nextcloud's 423 when creating the lock reads as busy, so the export retries", async () => {
+    const b = loadBackground((url, opts) => (url === LOCK_URL && opts.method === 'PUT') ? { status: 423 } : noLock(url, opts));
+    await b.seed();
+    const res = await b.call('pushBookmarksToServer');
+    assert.strictEqual(res.status, 'locked');
+    assert.ok(!b.log.includes('PUT bookmarks_sync.json'));
+});
+
+test('auto-push: a bookmark event during a sync is ignored before the async settings read', async () => {
+    const b = loadBackground(noLock);
+    await b.seed();
+    vm.runInContext('isSyncing = true', b.sandbox);
+    // The sync ends before the storage callback would have run
+    b.sandbox.scheduleAutomaticPush();
+    vm.runInContext('isSyncing = false', b.sandbox);
+    await b.flush();
+    assert.strictEqual(b.timers.filter(t => t.ms === 5000).length, 0);
 });
 
 test('update: the current folder becomes the base, so a deletion right after is kept', async () => {

@@ -53,7 +53,15 @@ async function getActiveLocks(baseUrl, authHeader) {
         if (response.status === 423) return ['nextcloud-file-lock'];
         if (!response.ok) return null;
 
-        const lock = await response.json();
+        // An unreadable lock file (empty, hand-edited) is ignored: otherwise it would
+        // block every device for good, since it never reaches the staleness check
+        let lock = null;
+        try {
+            lock = await response.json();
+        } catch (error) {
+            console.warn("Ignoring unreadable lock file:", error);
+            return [];
+        }
         if (!lock || typeof lock.owner !== 'string' || !lock.owner || !lock.timestamp) return [];
         if (Date.now() - lock.timestamp > LOCK_STALE_MS) return []; // Stale, ignore it
 
@@ -79,8 +87,10 @@ async function createLock(baseUrl, authHeader, extensionId) {
             }
         });
 
+        // Nextcloud's own file locking: busy right now, worth retrying
+        if (response.status === 423) return { busy: true };
         if (!response.ok) return null;
-        return LOCK_FILE_NAME;
+        return { lockFile: LOCK_FILE_NAME };
     } catch (error) {
         console.error("Lock creation failed:", error);
         return null;
@@ -119,8 +129,10 @@ async function acquireLock(baseUrl, authHeader, extensionId) {
     const otherLocks = activeLocks.filter(lock => !lock.startsWith(extensionId));
     if (otherLocks.length > 0) return { status: "locked", message: "Another device is syncing." };
 
-    const lockFile = await createLock(baseUrl, authHeader, extensionId);
-    if (!lockFile) return { status: "error", message: "Lock failed." };
+    const created = await createLock(baseUrl, authHeader, extensionId);
+    if (created && created.busy) return { status: "locked", message: "Another device is syncing." };
+    if (!created) return { status: "error", message: "Lock failed." };
+    const lockFile = created.lockFile;
 
     // The lock we just wrote replaces the previous pull's: its delayed removal would delete ours
     if (pendingLockRemoval) {
@@ -496,12 +508,14 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             const savedBase = await loadSyncBase(fileUrl);
 
             // Another device exported since our last sync: merge its changes instead
-            // of overwriting them. Without a base the server wins, as on import.
+            // of overwriting them. Without a base (fresh install, new server) both
+            // sides are kept: an export is meant to send this device's bookmarks.
+            // Devices updated from an older version get a base at update time.
             let uploadChildren = local.children;
             let skipped = null;
             const remoteChanged = remote.tree && !(savedBase && sameTree(remote.tree.children, savedBase));
             if (remoteChanged) {
-                uploadChildren = mergeChildren(savedBase || local.children, local.children, remote.tree.children);
+                uploadChildren = mergeChildren(savedBase, local.children, remote.tree.children);
                 if (!sameTree(uploadChildren, local.children)) {
                     ({ skipped } = await applyTreeToLocal(syncFolderId, uploadChildren));
                 }
@@ -684,6 +698,8 @@ function armAutomaticPush() {
 }
 
 function scheduleAutomaticPush() {
+    // Checked before the async read too: an import may finish before its callback runs
+    if (isSyncing) return;
     chrome.storage.local.get(['autoSyncEnabled'], (result) => {
         if (result.autoSyncEnabled === false) return;
         if (isSyncing) return; // Ignores the bookmark events caused by an import
