@@ -262,6 +262,8 @@ function pickSyncFolder(results) {
     folders.sort((a, b) => ((a.dateAdded || 0) - (b.dateAdded || 0)) || String(a.id).localeCompare(String(b.id)));
     const extra = Math.max(folders.length - 1, 0);
     const syncedId = extra > 0 ? folders[0].id : null;
+    // Bookmark events then follow the folder actually synced, even if it changed
+    cachedSyncFolderId = folders[0] ? folders[0].id : null;
     chrome.storage.local.get(['duplicateSyncFolders', 'syncedFolderId'], (stored) => {
         if ((stored.duplicateSyncFolders || 0) !== extra || (stored.syncedFolderId || null) !== syncedId) {
             chrome.storage.local.set({ duplicateSyncFolders: extra, syncedFolderId: syncedId });
@@ -327,9 +329,13 @@ async function getOrCreateArchiveFolder(targetParentId, targetIndex) {
         });
     });
 
-    // 2. Ensure a sub-folder for today's date exists inside the main Archive
+    // 2. Ensure a sub-folder for today's date exists inside the main Archive.
+    // null if the archive folder is gone meanwhile (e.g. removed by the browser's own sync)
+    if (!mainArchiveId) return null;
     return new Promise(resolve => {
         chrome.bookmarks.getChildren(mainArchiveId, (children) => {
+            void chrome.runtime.lastError;
+            if (!children) return resolve(null);
             const dateFolder = children.find(c => !c.url && c.title === today);
             if (dateFolder) return resolve(dateFolder.id);
 
@@ -454,16 +460,21 @@ function withoutSkipped(nodes, skipped) {
         .map(node => node.url ? node : { title: node.title, children: withoutSkipped(node.children, skipped) });
 }
 
-// The base is tied to the remote file: after a server change it would wrongly read as deletions
-function loadSyncBase(fileUrl) {
+// The base is tied to the remote file and to the local folder: after a server change,
+// or when another folder becomes the synced one (e.g. an older duplicate brought by
+// the browser's own sync), comparing with it would read differences as deletions.
+// A base without a folder id (written by 1.7.0 or older) is accepted.
+function loadSyncBase(fileUrl, folderId) {
     return new Promise(resolve => chrome.storage.local.get([SYNC_BASE_KEY], (result) => {
         const saved = result[SYNC_BASE_KEY];
-        resolve(saved && saved.fileUrl === fileUrl ? saved.children : null);
+        if (!saved || saved.fileUrl !== fileUrl) return resolve(null);
+        if (saved.folderId && folderId && saved.folderId !== folderId) return resolve(null);
+        resolve(saved.children);
     }));
 }
 
-function saveSyncBase(fileUrl, children) {
-    return new Promise(resolve => chrome.storage.local.set({ [SYNC_BASE_KEY]: { fileUrl, children } }, resolve));
+function saveSyncBase(fileUrl, children, folderId) {
+    return new Promise(resolve => chrome.storage.local.set({ [SYNC_BASE_KEY]: { fileUrl, folderId, children } }, resolve));
 }
 
 // Compression proxies rewrite the ETag of the response they compress (nginx makes
@@ -602,7 +613,11 @@ async function applyTreeToLocal(syncFolderId, targetNodes, knownIds = null) {
 
         const toArchive = localChildren.filter(local => !claimedIds.has(local.id) && (!knownIds || knownIds.has(local.id)));
         if (toArchive.length > 0) {
-            const archiveFolderId = await getOrCreateArchiveFolder(rootParentId, rootIndex + 1);
+            // A second try creates the archive folder again if it vanished meanwhile.
+            // Failing then (base not saved) replays the whole sync next time.
+            const archiveFolderId = await getOrCreateArchiveFolder(rootParentId, rootIndex + 1)
+                || await getOrCreateArchiveFolder(rootParentId, rootIndex + 1);
+            if (!archiveFolderId) throw new Error("Archive folder unavailable");
             for (const localNode of toArchive) {
                 await new Promise(resolve => {
                     chrome.bookmarks.move(localNode.id, { parentId: archiveFolderId }, resolve);
@@ -680,7 +695,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             noteRemoteFormat(remote);
             // A recreated folder is empty because it was deleted or renamed, not because
             // the user deleted every bookmark: without a base, the merge restores them
-            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl);
+            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl, syncFolderId);
 
             // Another device exported since our last sync: merge its changes instead
             // of overwriting them. Without a base (fresh install, new server) both
@@ -697,14 +712,14 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
                 }
                 // The merge is applied locally: if the upload fails, the remote we read
                 // is the base, so its items aren't mistaken for local additions next time
-                await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped));
+                await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped), syncFolderId);
             }
 
             // Nothing new for the server: no upload, so no new ETag for other devices
             // to download, and less contention on the file. A file from an old-version
             // device is still rewritten, so it no longer reads as one.
             if (remote.tree && !remote.legacy && sameTree(uploadChildren, remote.tree.children)) {
-                await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped));
+                await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped), syncFolderId);
                 return sendResponse({ status: "success", message: syncSummary(counts, false) });
             }
 
@@ -740,7 +755,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             if (response.status === 423) throw new SyncError(BUSY_MESSAGE, { locked: true });
             if (!response.ok) throw new SyncError(describeHttpStatus(response.status));
 
-            await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped));
+            await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped), syncFolderId);
             chrome.storage.local.set({ newFormatSeen: true });
 
             console.log("🚀 Sync successful!");
@@ -812,11 +827,11 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             // and recreated empty) the server wins: the folder is restored from it, and a
             // stale folder (e.g. brought back by the browser's own sync) doesn't bring
             // back what other devices deleted
-            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl);
+            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl, syncFolderId);
             const target = mergeChildren(savedBase || local.children, local.children, remote.tree.children);
 
             const { counts, skipped } = await applyTreeToLocal(syncFolderId, target, knownIds);
-            await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped));
+            await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped), syncFolderId);
 
             // Kept local changes still have to reach the server
             exportNeeded = !sameTree(target, remote.tree.children) || remote.legacy;
@@ -843,7 +858,8 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
 
 // Date folders are named after the UTC day (YYYY-MM-DD) their items were archived:
 // compared as days, so an item is kept at least retentionDays full days. The archive
-// folder itself is removed once empty (created again by the next archiving).
+// folder itself is removed once empty, if next to the sync folder (created again
+// there by the next archiving).
 async function cleanOldArchives() {
     const { retentionDays } = await new Promise(resolve => chrome.storage.local.get(['retentionDays'], resolve));
     const cutoff = new Date(Date.now() - (retentionDays || 30) * 86400000).toISOString().split('T')[0];
@@ -852,7 +868,10 @@ async function cleanOldArchives() {
     const mainArchive = (results || []).find(r => !r.url);
     if (!mainArchive) return;
 
-    const children = await new Promise(resolve => chrome.bookmarks.getChildren(mainArchive.id, resolve));
+    const children = await new Promise(resolve => chrome.bookmarks.getChildren(mainArchive.id, (nodes) => {
+        void chrome.runtime.lastError; // Removed meanwhile
+        resolve(nodes || []);
+    }));
     let remaining = children.length;
     for (const folder of children) {
         if (folder.url || !/^\d{4}-\d{2}-\d{2}$/.test(folder.title) || folder.title >= cutoff) continue;
@@ -861,9 +880,17 @@ async function cleanOldArchives() {
         console.log(`♻️ Deleted old archive folder: ${folder.title}`);
     }
 
+    // Only where it is created by default, next to the sync folder: moved elsewhere by
+    // the user, it stays (it would come back next to the sync folder).
     // remove(), not removeTree(): the browser refuses it if the folder isn't empty after all.
     // Not during a sync: it may be about to archive into this folder.
-    if (remaining === 0 && !isSyncing) {
+    if (remaining > 0) return;
+    const syncFolderId = await findSyncFolderId();
+    const syncFolder = syncFolderId && await new Promise(resolve => chrome.bookmarks.get(syncFolderId, (nodes) => {
+        void chrome.runtime.lastError;
+        resolve(nodes && nodes[0]);
+    }));
+    if (syncFolder && syncFolder.parentId === mainArchive.parentId && !isSyncing) {
         chrome.bookmarks.remove(mainArchive.id, () => void chrome.runtime.lastError);
     }
 }
@@ -1157,24 +1184,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 });
 
-// Setup background alarms
 // Updating from a version without a sync base: the folder as it is now (in sync,
 // barring changes from the last few seconds) becomes the base, so deletions made
-// right after the update aren't undone by the next merge
+// right after the update aren't undone by the next merge.
+// Updating from a version whose base has no folder id (1.7.0 or older): the base is
+// tagged with the folder those versions synced, the first one found by name. With
+// duplicates, the synced folder is now the oldest one: if it isn't that one, the
+// next sync reads the change and doesn't compare the other folder with this base.
 async function seedSyncBaseAfterUpdate() {
-    const { serverUrl } = await new Promise(resolve => chrome.storage.local.get(['serverUrl'], resolve));
+    const { serverUrl, [SYNC_BASE_KEY]: saved } = await new Promise(resolve => chrome.storage.local.get(['serverUrl', SYNC_BASE_KEY], resolve));
     if (!serverUrl) return;
     const baseUrl = serverUrl.endsWith('/') ? serverUrl : serverUrl + '/';
     const fileUrl = baseUrl + 'bookmarks_sync.json';
-    if (await loadSyncBase(fileUrl)) return;
 
-    const folder = await new Promise(resolve => chrome.bookmarks.search({ title: SYNC_FOLDER_NAME }, (results) => {
-        resolve(pickSyncFolder(results));
-    }));
+    const results = await new Promise(resolve => chrome.bookmarks.search({ title: SYNC_FOLDER_NAME }, resolve));
+    if (saved && saved.fileUrl === fileUrl) {
+        const previous = (results || []).find(r => !r.url);
+        if (!saved.folderId && previous) await saveSyncBase(fileUrl, saved.children, previous.id);
+        return;
+    }
+
+    const folder = pickSyncFolder(results);
     if (!folder) return;
-
     const local = normalizeNode(await getBookmarksTreeAsync(folder.id));
-    await saveSyncBase(fileUrl, withoutArchiveFolder(local.children));
+    await saveSyncBase(fileUrl, withoutArchiveFolder(local.children), folder.id);
 }
 
 // The archive cleanup, and the automatic import unless automatic sync is paused.
@@ -1191,7 +1224,9 @@ function createAlarms(firstRun = {}) {
 
 chrome.runtime.onInstalled.addListener((details) => {
     if (details && details.reason === 'update') seedSyncBaseAfterUpdate();
-    createAlarms();
+    // With a first run soon too: a browser or extension update applied at startup
+    // fires this after onStartup, and must not push the startup import back
+    createAlarms({ delayInMinutes: 1 });
 });
 
 // Listen to alarms
@@ -1220,7 +1255,13 @@ if (chrome.bookmarks.onCreated) {
     chrome.bookmarks.onCreated.addListener((id, node) => onBookmarkEvent(node && node.parentId));
 }
 if (chrome.bookmarks.onRemoved) {
-    chrome.bookmarks.onRemoved.addListener((id, removeInfo) => onBookmarkEvent(removeInfo && removeInfo.parentId));
+    chrome.bookmarks.onRemoved.addListener((id, removeInfo) => {
+        // A sync folder removed (e.g. a duplicate): searched again, which also
+        // updates the duplicate count shown in the popup
+        const node = removeInfo && removeInfo.node;
+        if (node && !node.url && node.title === SYNC_FOLDER_NAME) cachedSyncFolderId = null;
+        onBookmarkEvent(removeInfo && removeInfo.parentId);
+    });
 }
 if (chrome.bookmarks.onChanged) {
     chrome.bookmarks.onChanged.addListener((id) => onBookmarkEvent(id));

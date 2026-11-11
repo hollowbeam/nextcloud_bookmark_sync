@@ -1671,14 +1671,156 @@ test('cleanup: archives are kept for whole days, and other folders are left alon
     assert.deepStrictEqual(b.titlesIn(archive.id), [daysAgo(1), 'Notes']);
 });
 
-test('cleanup: the archive folder is removed once its last date folder expires', async () => {
+test('cleanup: the archive folder next to the sync folder is removed once its last date folder expires', async () => {
     const b = loadBackground(noLock);
     b.store.retentionDays = 30;
+    await b.seed();
     const archive = await b.addLocal('1', '🗑️ Bookmark Archives');
     const old = await b.addLocal(archive.id, daysAgo(31));
     await b.addLocal(old.id, 'O', 'https://o.example/');
     await b.sandbox.cleanOldArchives();
     await b.flush();
     assert.strictEqual(b.bookmarks.nodes.has(archive.id), false);
-    assert.deepStrictEqual(b.titlesIn('1'), []);
+    assert.deepStrictEqual(b.titlesIn('1'), ['🔄 Bookmark Sync']);
+});
+
+test('cleanup: an emptied archive folder the user moved elsewhere is kept there', async () => {
+    const b = loadBackground(noLock);
+    b.store.retentionDays = 30;
+    await b.seed();
+    const other = await b.addLocal('0', 'Other bookmarks');
+    const archive = await b.addLocal(other.id, '🗑️ Bookmark Archives');
+    const old = await b.addLocal(archive.id, daysAgo(31));
+    await b.addLocal(old.id, 'O', 'https://o.example/');
+    await b.sandbox.cleanOldArchives();
+    await b.flush();
+    assert.strictEqual(b.bookmarks.nodes.get(archive.id).parentId, other.id);
+    assert.deepStrictEqual(b.titlesIn(archive.id), []);
+});
+
+test('archive: a sync does not hang if the archive folder vanishes while it archives', async () => {
+    const state = { remote: { title: 'root', children: [] } };
+    const b = loadBackground(davServer(state));
+    const syncId = await b.seed();
+    const archive = await b.addLocal('1', '🗑️ Bookmark Archives');
+    await b.addLocal(syncId, 'A', bm('A').url);
+    b.store.syncBase = { fileUrl: JSON_URL, folderId: syncId, children: [bm('A')] };
+    // Removed by the browser's own sync between the search and the listing
+    const getChildren = b.bookmarks.getChildren;
+    b.bookmarks.getChildren = (id, cb) => {
+        if (id !== archive.id) return getChildren(id, cb);
+        setImmediate(() => {
+            const kids = b.bookmarks.nodes.get('1').children;
+            kids.splice(kids.indexOf(archive.id), 1);
+            b.bookmarks.nodes.delete(archive.id);
+            b.sandbox.chrome.runtime.lastError = { message: "Can't find parent bookmark for id." };
+            cb(undefined);
+            b.sandbox.chrome.runtime.lastError = undefined;
+        });
+    };
+    const res = await Promise.race([b.call('pullBookmarksFromServer'), new Promise(r => setTimeout(() => r('timeout'), 500))]);
+    assert.notStrictEqual(res, 'timeout', 'sync hung');
+    assert.strictEqual(res.message, '1 archived.');
+});
+
+test('startup: an update applied at startup keeps the import a minute after startup', async () => {
+    const b = loadBackground(noLock);
+    b.sandbox.chrome.runtime.startup();
+    await b.installed({ reason: 'browser_update' });
+    assert.strictEqual(b.alarms.autoPullAlarm.delayInMinutes, 1);
+});
+
+// ------------------------------------------------------------------
+// The synced folder changes (duplicates): the base of the old one isn't used
+// ------------------------------------------------------------------
+
+// X: the folder synced so far; Y: an older duplicate (e.g. brought by the browser's own sync)
+async function switchedFolders(remoteChildren) {
+    const state = { remote: { title: 'root', children: remoteChildren } };
+    const b = loadBackground(davServer(state));
+    const x = await b.addLocal('1', '🔄 Bookmark Sync');
+    const y = await b.addLocal('1', '🔄 Bookmark Sync');
+    b.bookmarks.nodes.get(x.id).dateAdded = 2000;
+    b.bookmarks.nodes.get(y.id).dateAdded = 1000;
+    return { state, b, x, y };
+}
+
+test('folder switch: an import restores the server content instead of deleting it', async () => {
+    const { state, b, x, y } = await switchedFolders([bm('A'), bm('B')]);
+    await b.addLocal(x.id, 'A', bm('A').url);
+    await b.addLocal(x.id, 'B', bm('B').url);
+    await b.addLocal(y.id, 'C', bm('C').url);
+    b.store.syncBase = { fileUrl: JSON_URL, folderId: x.id, children: [bm('A'), bm('B')] };
+    await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.deepStrictEqual(b.titlesIn(y.id), ['A', 'B']);
+    assert.deepStrictEqual(b.titlesIn(x.id), ['A', 'B']);
+    await b.call('pushBookmarksToServer');
+    assert.deepStrictEqual(titles(state.remote.children), ['A', 'B']);
+});
+
+test('folder switch: an export keeps the server content (union) instead of deleting it', async () => {
+    const { state, b, x, y } = await switchedFolders([bm('A'), bm('B')]);
+    await b.addLocal(x.id, 'A', bm('A').url);
+    await b.addLocal(x.id, 'B', bm('B').url);
+    await b.addLocal(y.id, 'C', bm('C').url);
+    b.store.syncBase = { fileUrl: JSON_URL, folderId: x.id, children: [bm('A'), bm('B')] };
+    const res = await b.call('pushBookmarksToServer');
+    assert.strictEqual(res.status, 'success', res.message);
+    assert.deepStrictEqual(titles(state.remote.children).sort(), ['A', 'B', 'C']);
+});
+
+test('update: a base without folder id is tagged, and a local deletion is still sent', async () => {
+    const state = { remote: { title: 'root', children: [bm('A'), bm('X')] } };
+    const b = loadBackground(davServer(state));
+    const syncId = await b.seed();
+    await b.addLocal(syncId, 'A', bm('A').url);
+    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A'), bm('X')] }; // written by 1.7.0
+    await b.installed({ reason: 'update' });
+    assert.strictEqual(b.store.syncBase.folderId, syncId);
+    await b.call('pushBookmarksToServer');
+    assert.deepStrictEqual(titles(state.remote.children), ['A']);
+});
+
+test('update: with duplicates, the folder synced by 1.7.0 is tagged, so the switch to the oldest is detected', async () => {
+    const { state, b, x, y } = await switchedFolders([bm('A'), bm('B')]); // x is found first by search
+    await b.addLocal(x.id, 'A', bm('A').url);
+    await b.addLocal(x.id, 'B', bm('B').url);
+    await b.addLocal(y.id, 'C', bm('C').url);
+    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A'), bm('B')] };
+    await b.installed({ reason: 'update' });
+    assert.strictEqual(b.store.syncBase.folderId, x.id);
+    await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.deepStrictEqual(b.titlesIn(y.id), ['A', 'B']);
+    assert.deepStrictEqual(titles(state.remote.children), ['A', 'B']);
+});
+
+test('folder switch: bookmark events follow the folder actually synced', async () => {
+    const b = loadBackground(noLock);
+    const x = await b.addLocal('1', '🔄 Bookmark Sync');
+    b.bookmarks.nodes.get(x.id).dateAdded = 2000;
+    assert.strictEqual(await b.sandbox.findSyncFolderId(), x.id);
+    const y = await b.addLocal('1', '🔄 Bookmark Sync');
+    b.bookmarks.nodes.get(y.id).dateAdded = 1000;
+    await b.sandbox.getOrCreateSyncFolder();
+    b.bookmarks.events.created('n', { parentId: y.id });
+    await b.flush();
+    assert.strictEqual(b.timers.filter(t => t.ms === 5000).length, 1);
+});
+
+test('folder: removing a duplicate updates the count at once', async () => {
+    const b = loadBackground(noLock);
+    const first = await b.addLocal('1', '🔄 Bookmark Sync');
+    const second = await b.addLocal('1', '🔄 Bookmark Sync');
+    await b.sandbox.findSyncFolderId();
+    await b.flush();
+    assert.strictEqual(b.store.duplicateSyncFolders, 1);
+    const kids = b.bookmarks.nodes.get('1').children;
+    kids.splice(kids.indexOf(second.id), 1);
+    b.bookmarks.nodes.delete(second.id);
+    b.bookmarks.events.removed(second.id, { parentId: '1', node: { id: second.id, title: '🔄 Bookmark Sync' } });
+    await b.flush();
+    assert.strictEqual(b.store.duplicateSyncFolders, 0);
+    assert.strictEqual(await b.sandbox.findSyncFolderId(), first.id);
 });
