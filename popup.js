@@ -21,6 +21,43 @@
 // UTILITY FUNCTIONS
 // ==========================================
 
+const SYNC_FOLDER_NAME = "🔄 Bookmark Sync";
+const ARCHIVE_FOLDER_NAME = "🗑️ Bookmark Archives";
+const LEGACY_WARNING_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Text in the browser's language (_locales/), the key itself when missing
+function t(key, ...substitutions) {
+    const text = chrome.i18n && chrome.i18n.getMessage(key, substitutions.map(String));
+    return text || key;
+}
+
+function uiLanguage() {
+    return (chrome.i18n && chrome.i18n.getUILanguage && chrome.i18n.getUILanguage()) || 'en';
+}
+
+// Fills the elements marked data-i18n (text), data-i18n-placeholder and data-i18n-title
+function translatePage() {
+    document.documentElement.lang = uiLanguage();
+    document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+    document.querySelectorAll('[data-i18n-placeholder]').forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+    document.querySelectorAll('[data-i18n-title]').forEach(el => {
+        el.title = t(el.dataset.i18nTitle);
+        el.setAttribute('aria-label', el.title);
+    });
+}
+
+// "just now", "3 minutes ago", "yesterday"...
+function relativeTime(time) {
+    const seconds = Math.round((time - Date.now()) / 1000);
+    if (seconds > -60) return t('justNow');
+    const format = new Intl.RelativeTimeFormat(uiLanguage(), { numeric: 'auto' });
+    const minutes = Math.round(seconds / 60);
+    if (minutes > -60) return format.format(minutes, 'minute');
+    const hours = Math.round(minutes / 60);
+    if (hours > -24) return format.format(hours, 'hour');
+    return format.format(Math.round(hours / 24), 'day');
+}
+
 // Detect browser for unique ID generation
 async function getBrowserPrefix() {
     if (navigator.brave && await navigator.brave.isBrave()) return 'b';
@@ -34,56 +71,76 @@ async function getBrowserPrefix() {
 // MAIN INITIALIZATION
 // ==========================================
 
-// Wait for the DOM to be fully loaded before running scripts (fixes layout warnings)
 document.addEventListener('DOMContentLoaded', async () => {
+    translatePage();
 
-    // 1. View Navigation Logic
-    const mainView = document.getElementById('mainView');
-    const settingsView = document.getElementById('settingsView');
+    const $ = (id) => document.getElementById(id);
+
+    // Shows a result line: kind is 'ok', 'error', 'busy' or '' (plain)
+    function show(el, text, kind = '') {
+        el.className = el.className.split(' ').filter(c => !['ok', 'error', 'busy'].includes(c)).concat(kind ? [kind] : []).join(' ');
+        el.textContent = text;
+    }
+
+    // Reads the background's answer; a missing one (e.g. a closed port) reads as an error
+    function backgroundResponse(response) {
+        if (chrome.runtime.lastError) console.warn(chrome.runtime.lastError.message);
+        return response || { status: "error", message: t('errGeneric') };
+    }
+
+
+    // 1. Views
+    const mainView = $('mainView');
+    const settingsView = $('settingsView');
 
     const showSettings = () => {
         mainView.classList.remove('active');
         settingsView.classList.add('active');
     };
-    document.getElementById('goToSettingsBtn').addEventListener('click', showSettings);
-    document.getElementById('openSettingsBtn').addEventListener('click', showSettings);
+    $('goToSettingsBtn').addEventListener('click', showSettings);
+    $('openSettingsBtn').addEventListener('click', showSettings);
+    $('checkSettings').addEventListener('click', showSettings);
 
-    document.getElementById('goToMainBtn').addEventListener('click', () => {
+    $('goToMainBtn').addEventListener('click', () => {
         settingsView.classList.remove('active');
         mainView.classList.add('active');
     });
 
 
+    // 2. Main screen state: setup card, last sync, old-version warning, version
+
     // First-run guidance: shown until the URL, username and password are filled in
     function updateSetupCard(settings) {
         const configured = settings.serverUrl && settings.username && settings.password;
-        document.getElementById('setupCard').hidden = Boolean(configured);
+        $('setupCard').hidden = Boolean(configured);
     }
 
-    // Outcome of the last export or import (manual or automatic), kept by the background script
-    function renderLastSync(lastSync) {
-        const line = document.getElementById('lastSync');
+    // Outcome of the last sync (manual or automatic), kept by the background script
+    let lastSync = null;
+    function renderLastSync(record) {
+        lastSync = record || null;
+        const line = $('lastSync');
         if (!lastSync) {
-            line.textContent = '';
+            show(line, '');
             return;
         }
-        const when = new Date(lastSync.time).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
-        const what = lastSync.kind === 'import' ? 'Import' : 'Export';
-        line.className = lastSync.ok ? '' : 'failed';
+        const when = relativeTime(lastSync.time);
+        line.classList.toggle('failed', !lastSync.ok);
         line.textContent = lastSync.ok
-            ? `Last sync: ${what} OK, ${when}`
-            : `Last ${what.toLowerCase()} failed (${when}): ${lastSync.message}`;
+            ? t(lastSync.kind === 'import' ? 'lastImportOk' : 'lastSyncOk', when)
+            : t('lastSyncFailed', when, lastSync.message);
     }
+    // Keeps "3 minutes ago" true while the popup stays open
+    if (typeof setInterval === 'function') setInterval(() => renderLastSync(lastSync), 30000);
 
     // A file written by a device on 1.5.1 or older was seen recently (set by the background)
-    const LEGACY_WARNING_MS = 7 * 24 * 60 * 60 * 1000;
     function renderLegacyWarning(legacySeenAt) {
-        document.getElementById('legacyWarning').hidden = !(legacySeenAt && Date.now() - legacySeenAt < LEGACY_WARNING_MS);
+        $('legacyWarning').hidden = !(legacySeenAt && Date.now() - legacySeenAt < LEGACY_WARNING_MS);
     }
 
     // Version of the installed extension, handy when helping someone or reporting a bug
     if (chrome.runtime.getManifest) {
-        document.getElementById('version').textContent = `v${chrome.runtime.getManifest().version}`;
+        $('version').textContent = `v${chrome.runtime.getManifest().version}`;
     }
 
     chrome.storage.local.get(['lastSync', 'legacySeenAt'], (result) => {
@@ -101,124 +158,88 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
 
-    // 2. Load Settings & Initialize ID
+    // 3. Load settings & initialize the device ID
+    const daysText = (days) => (Number(days) === 1 ? t('oneDay') : t('days', days));
+
     chrome.storage.local.get([
         'serverUrl', 'username', 'password', 'extensionId',
         'syncFrequency', 'autoSyncEnabled', 'retentionDays'
     ], async (result) => {
         updateSetupCard(result);
 
-        // Populate text inputs
-        if (result.serverUrl) document.getElementById('serverUrl').value = result.serverUrl;
-        if (result.username) document.getElementById('username').value = result.username;
-        if (result.password) document.getElementById('password').value = result.password;
-        if (result.syncFrequency) document.getElementById('syncFrequency').value = result.syncFrequency;
+        if (result.serverUrl) $('serverUrl').value = result.serverUrl;
+        if (result.username) $('username').value = result.username;
+        if (result.password) $('password').value = result.password;
+        if (result.syncFrequency) $('syncFrequency').value = result.syncFrequency;
 
-        // Populate Auto-sync toggle (Default to true)
-        const autoSyncCheckbox = document.getElementById('autoSyncEnabled');
-        if (autoSyncCheckbox) {
-            autoSyncCheckbox.checked = result.autoSyncEnabled !== false;
-        }
+        // Auto-sync is on by default
+        $('autoSyncEnabled').checked = result.autoSyncEnabled !== false;
+        renderAutoSyncState();
 
-        // Populate Retention Slider (Default to 30 days)
-        const retentionDaysInput = document.getElementById('retentionDays');
-        const daysValueSpan = document.getElementById('daysValue');
-        if (retentionDaysInput && daysValueSpan) {
-            const days = result.retentionDays || 30;
-            retentionDaysInput.value = days;
-            daysValueSpan.textContent = days + (days == 1 ? ' day' : ' days');
-        }
+        const days = result.retentionDays || 30;
+        $('retentionDays').value = days;
+        $('daysValue').textContent = daysText(days);
 
-        // Generate Extension ID if missing
-        let extId = result.extensionId;
-        if (!extId) {
+        if (!result.extensionId) {
             const prefix = await getBrowserPrefix();
             const randomDigits = Math.floor(10000000 + Math.random() * 90000000);
-            extId = `${prefix}${randomDigits}`;
-            chrome.storage.local.set({ extensionId: extId });
+            chrome.storage.local.set({ extensionId: `${prefix}${randomDigits}` });
         }
     });
 
 
-    // 3. Auto-Sync Toggle Logic (Main View)
-    document.getElementById('autoSyncEnabled').addEventListener('change', (e) => {
+    // 4. Automatic sync toggle (main screen)
+    function renderAutoSyncState() {
+        const on = $('autoSyncEnabled').checked;
+        const state = $('autoSyncState');
+        state.textContent = on ? t('autoSyncOn') : t('autoSyncPaused');
+        state.classList.toggle('on', on);
+    }
+
+    $('autoSyncEnabled').addEventListener('change', (e) => {
         const isEnabled = e.target.checked;
+        renderAutoSyncState();
         chrome.storage.local.set({ autoSyncEnabled: isEnabled }, () => {
-
-            // Show status feedback directly on the main view
-            const status = document.getElementById('status');
-            status.style.color = isEnabled ? "#27ae60" : "#777";
-            status.textContent = isEnabled ? "Auto-sync enabled" : "Auto-sync disabled";
-
-            setTimeout(() => {
-                if (status.textContent.includes("Auto-sync")) {
-                    status.textContent = '';
-                }
-            }, 2000);
-
-            // Notify background script to stop/start timers
-            chrome.runtime.sendMessage({
-                action: "toggle_auto_sync",
-                enabled: isEnabled
-            });
+            // Starts or stops the background timers
+            chrome.runtime.sendMessage({ action: "toggle_auto_sync", enabled: isEnabled });
         });
     });
 
 
-    // 4. Archive Retention Slider Logic (Settings View)
-    const retentionDaysInput = document.getElementById('retentionDays');
-    const daysValueSpan = document.getElementById('daysValue');
+    // 5. Settings: saved as you type
+    const flashSaved = () => {
+        const indicator = $('saveIndicator');
+        indicator.style.opacity = '1';
+        setTimeout(() => { indicator.style.opacity = '0'; }, 2000);
+    };
 
-    if (retentionDaysInput && daysValueSpan) {
-        // Update text dynamically while dragging
-        retentionDaysInput.addEventListener('input', (e) => {
-            const days = e.target.value;
-            daysValueSpan.textContent = days + (days == 1 ? ' day' : ' days');
-        });
+    $('retentionDays').addEventListener('input', (e) => { $('daysValue').textContent = daysText(e.target.value); });
+    $('retentionDays').addEventListener('change', (e) => {
+        chrome.storage.local.set({ retentionDays: parseInt(e.target.value, 10) }, flashSaved);
+    });
 
-        // Save to storage only when user drops the slider
-        retentionDaysInput.addEventListener('change', (e) => {
-            chrome.storage.local.set({ retentionDays: parseInt(e.target.value, 10) }, () => {
-                const indicator = document.getElementById('saveIndicator');
-                indicator.style.opacity = '1';
-                setTimeout(() => indicator.style.opacity = '0', 2000);
-            });
-        });
-    }
-
-
-    // 5. Debounced Auto-Save Logic (For text inputs and dropdowns)
     const inputs = ['serverUrl', 'username', 'password', 'syncFrequency'];
     const saveTimeouts = {};
 
     function persistField(id) {
-        const value = document.getElementById(id).value.trim();
+        const value = $(id).value.trim();
         chrome.storage.local.set({ [id]: value }, () => {
-
-            // Show small "Saved!" animation
-            const indicator = document.getElementById('saveIndicator');
-            indicator.style.opacity = '1';
-            setTimeout(() => indicator.style.opacity = '0', 2000);
-
-            // If frequency changed, notify background script to update the alarm
+            flashSaved();
+            // The frequency drives the background alarm
             if (id === 'syncFrequency') {
-                chrome.runtime.sendMessage({
-                    action: "update_alarm",
-                    frequency: parseInt(value, 10)
-                });
+                chrome.runtime.sendMessage({ action: "update_alarm", frequency: parseInt(value, 10) });
             }
         });
     }
 
     inputs.forEach(id => {
-        document.getElementById(id).addEventListener('input', () => {
+        $(id).addEventListener('input', () => {
             clearTimeout(saveTimeouts[id]);
-            saveTimeouts[id] = setTimeout(() => persistField(id), 600); // 600ms debounce
+            saveTimeouts[id] = setTimeout(() => persistField(id), 600);
         });
     });
 
-    // Flush any pending debounced save immediately once the popup loses focus,
-    // since it can be dismissed at any moment and a queued save would otherwise be lost.
+    // The popup can close at any moment: a pending save is flushed when it loses focus
     window.addEventListener('blur', () => {
         inputs.forEach(id => {
             if (saveTimeouts[id]) {
@@ -229,111 +250,146 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
+    // App passwords are long and pasted: showing them helps spot a stray character
+    $('togglePassword').addEventListener('click', () => {
+        const field = $('password');
+        const showing = field.type === 'text';
+        field.type = showing ? 'password' : 'text';
+        $('togglePassword').textContent = showing ? t('showPassword') : t('hidePassword');
+    });
+
 
     // 6. Server access
     // Checks the URL and asks for the host permission (needs the user's click).
     // Returns null when access is granted, otherwise the message to show.
     async function requestServerAccess(serverUrl) {
-        if (!serverUrl) return "Not set up yet: open Settings (⚙️).";
+        if (!serverUrl) return t('notSetUp');
 
         let parsedUrl = null;
         try {
             parsedUrl = new URL(serverUrl);
         } catch {
-            return "Invalid server URL.";
+            return t('errInvalidUrl');
         }
 
         // The manifest only allows https hosts
-        if (parsedUrl.protocol !== 'https:') return "Server URL must use https.";
+        if (parsedUrl.protocol !== 'https:') return t('errHttpsOnly');
 
         // Hostname rather than origin: Firefox match patterns don't support ports
         const origin = `https://${parsedUrl.hostname}/*`;
 
         const granted = await new Promise(resolve => chrome.permissions.request({ origins: [origin] }, resolve));
-        return granted ? null : "Permission denied for this server.";
+        return granted ? null : t('errPermissionDenied');
     }
 
-    const RED = "#c0392b";
 
-    // Reads the background's answer; a missing one (e.g. a closed port) reads as an error
-    function backgroundResponse(response) {
-        if (chrome.runtime.lastError) console.warn(chrome.runtime.lastError.message);
-        return response || { status: "error", message: "Error." };
-    }
-
+    // 7. Connection test: uses the values typed, even if not saved yet
+    const testResult = $('testResult');
     // A result for other values is misleading once a field changes
-    const testResult = document.getElementById('testResult');
     ['serverUrl', 'username', 'password'].forEach(id => {
-        document.getElementById(id).addEventListener('input', () => { testResult.textContent = ''; });
+        $(id).addEventListener('input', () => show(testResult, ''));
     });
 
-    // 7. Connection test (Settings View): uses the values typed, even if not saved yet
-    const testBtn = document.getElementById('testConnectionBtn');
+    const testBtn = $('testConnectionBtn');
     testBtn.addEventListener('click', async () => {
-        const result = testResult;
         const settings = {
-            serverUrl: document.getElementById('serverUrl').value.trim(),
-            username: document.getElementById('username').value.trim(),
-            password: document.getElementById('password').value.trim(),
+            serverUrl: $('serverUrl').value.trim(),
+            username: $('username').value.trim(),
+            password: $('password').value.trim(),
         };
 
         const accessError = await requestServerAccess(settings.serverUrl);
-        if (accessError) {
-            result.style.color = RED;
-            result.textContent = accessError;
-            return;
-        }
+        if (accessError) return show(testResult, accessError, 'error');
 
-        result.style.color = "#777";
-        result.textContent = "Testing...";
+        show(testResult, t('testing'), 'busy');
         testBtn.disabled = true;
         chrome.runtime.sendMessage({ action: "test_connection", ...settings }, (reply) => {
             const response = backgroundResponse(reply);
             testBtn.disabled = false;
-            result.style.color = response.status === "success" ? "#27ae60" : RED;
-            result.textContent = response.message;
+            show(testResult, response.message, response.status === "success" ? 'ok' : 'error');
         });
     });
 
 
-    // 8. Main Actions (Push & Pull)
-    let statusClearTimer = null;
+    // 8. Folder to sync: the default "🔄 Bookmark Sync", or one the user picks
+    const folderSelect = $('syncFolder');
+    let savedFolderId = '';
 
-    function handleSyncAction(actionName, btnId, activeColor, loadingText) {
-        const btn = document.getElementById(btnId);
-        if (!btn) return;
-
-        btn.addEventListener('click', async () => {
-            const status = document.getElementById('status');
-            // A pending clear from an earlier success must not wipe this action's message
-            clearTimeout(statusClearTimer);
-            const serverUrl = document.getElementById('serverUrl').value.trim();
-
-            const accessError = await requestServerAccess(serverUrl);
-            if (accessError) {
-                status.style.color = RED;
-                status.textContent = accessError;
-                return;
+    // Every bookmark folder, indented by depth; not the roots, the default sync
+    // folder (the first option) or the archive
+    function addFolderOptions(nodes, depth) {
+        for (const node of nodes) {
+            if (node.url) continue;
+            if (node.title === ARCHIVE_FOLDER_NAME) continue;
+            if (node.parentId && node.title !== SYNC_FOLDER_NAME) {
+                const option = document.createElement('option');
+                option.value = node.id;
+                option.textContent = `${'   '.repeat(depth)}${node.title || '…'}`;
+                folderSelect.appendChild(option);
             }
+            if (node.children) addFolderOptions(node.children, node.parentId ? depth + 1 : depth);
+        }
+    }
 
-            status.style.color = activeColor;
-            status.textContent = loadingText;
-
-            chrome.runtime.sendMessage({ action: actionName }, (reply) => {
-                const response = backgroundResponse(reply);
-                const ok = response.status === "success";
-                status.style.color = ok ? activeColor : RED;
-                status.textContent = response.message;
-                // Errors stay until the next action: they say what to fix
-                if (ok || response.status === "locked") {
-                    statusClearTimer = setTimeout(() => { status.textContent = ''; }, 3500);
-                }
+    if (chrome.bookmarks && chrome.bookmarks.getTree) {
+        chrome.bookmarks.getTree((tree) => {
+            addFolderOptions(tree || [], 0);
+            chrome.storage.local.get(['syncFolderId'], (result) => {
+                savedFolderId = result.syncFolderId || '';
+                folderSelect.value = savedFolderId;
+                // The chosen folder may have been deleted since
+                if (folderSelect.value !== savedFolderId) folderSelect.value = '';
             });
         });
     }
 
-    // Initialize the sync buttons with your specific action names
-    handleSyncAction('push_bookmarks', 'pushBtn', '#27ae60', 'Exporting...');
-    handleSyncAction('pull_bookmarks', 'pullBtn', '#e67e22', 'Importing...');
+    // A change of folder merges its bookmarks with the server's: confirmed first
+    folderSelect.addEventListener('change', () => {
+        $('folderConfirm').hidden = folderSelect.value === savedFolderId;
+    });
+    $('cancelFolder').addEventListener('click', () => {
+        folderSelect.value = savedFolderId;
+        $('folderConfirm').hidden = true;
+    });
+    $('confirmFolder').addEventListener('click', () => {
+        savedFolderId = folderSelect.value;
+        $('folderConfirm').hidden = true;
+        const done = () => flashSaved();
+        if (savedFolderId) chrome.storage.local.set({ syncFolderId: savedFolderId }, done);
+        else chrome.storage.local.remove('syncFolderId', done);
+    });
 
+
+    // 9. Sync now (main screen) and Import only (advanced settings)
+    let statusClearTimer = null;
+
+    async function runAction(action, resultEl, busyText, button) {
+        // A pending clear from an earlier success must not wipe this action's message
+        clearTimeout(statusClearTimer);
+        $('checkSettings').hidden = true;
+
+        const accessError = await requestServerAccess($('serverUrl').value.trim());
+        if (accessError) {
+            show(resultEl, accessError, 'error');
+            if (resultEl === $('status')) $('checkSettings').hidden = false;
+            return;
+        }
+
+        show(resultEl, busyText, 'busy');
+        button.disabled = true;
+        chrome.runtime.sendMessage({ action }, (reply) => {
+            const response = backgroundResponse(reply);
+            button.disabled = false;
+            const ok = response.status === "success";
+            show(resultEl, response.message, ok ? 'ok' : (response.status === "locked" ? 'busy' : 'error'));
+            // Errors stay until the next action, with a way to the settings to fix them
+            if (response.status === "error" && resultEl === $('status')) $('checkSettings').hidden = false;
+            if (ok || response.status === "locked") {
+                statusClearTimer = setTimeout(() => show(resultEl, ''), 4000);
+            }
+        });
+    }
+
+    $('syncBtn').addEventListener('click', () => runAction('sync_now', $('status'), t('syncing'), $('syncBtn')));
+    $('importBtn').addEventListener('click', () => runAction('pull_bookmarks', $('importResult'), t('importing'), $('importBtn')));
 });

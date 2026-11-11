@@ -4,138 +4,146 @@
     <meta charset="UTF-8">
     <title>Nextcloud Bookmark Sync</title>
     <style>
-        body { width: 320px; padding: 15px; font-family: system-ui, -apple-system, sans-serif; background-color: #f8f9fa; color: #333; margin: 0; }
+        /* Colors: light by default, dark when the browser or system uses a dark theme */
+        :root {
+            color-scheme: light dark;
+            --bg: #f8f9fa;
+            --surface: #ffffff;
+            --text: #333333;
+            --muted: #6b6b6b;
+            --label: #555555;
+            --border: #cccccc;
+            --divider: #e6e6e6;
+            --accent: #0082c9;
+            --accent-hover: #006da8;
+            --accent-soft: #eaf4fb;
+            --accent-border: #b6dcf2;
+            --ok: #1e8449;
+            --error: #c0392b;
+            --warn-text: #8a5a00;
+            --warn-bg: #fff4e0;
+            --warn-border: #f0c987;
+            --track: #e0e0e0;
+            --button-bg: #0082c9;
+            --button-hover: #006da8;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #1f2124;
+                --surface: #2a2d31;
+                --text: #e6e6e6;
+                --muted: #a0a4a8;
+                --label: #c4c7ca;
+                --border: #4a4e53;
+                --divider: #3a3d41;
+                --accent: #4fb3ea;
+                --accent-hover: #7cc6ef;
+                --accent-soft: #1d3442;
+                --accent-border: #2f5970;
+                --ok: #5fd08a;
+                --error: #ff7b6b;
+                --warn-text: #f3c77a;
+                --warn-bg: #3a2f1c;
+                --warn-border: #6b5428;
+                --track: #4a4e53;
+                /* Darker than the accent: white text stays readable */
+                --button-bg: #0a6fae;
+                --button-hover: #0c7fc6;
+            }
+        }
 
-        /* Header styling */
-        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #eee; padding-bottom: 10px; margin-bottom: 15px; }
+        /* hidden must win over the display rules below */
+        [hidden] { display: none !important; }
+
+        body { width: 320px; padding: 15px; font-family: system-ui, -apple-system, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; }
+
+        /* Header */
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid var(--divider); padding-bottom: 10px; margin-bottom: 15px; }
         .logo-container { display: flex; align-items: center; gap: 8px; }
-        h2 { margin: 0; color: #0082c9; font-size: 16px; } /* Slightly smaller for the longer name */
-
-        /* Icons styling */
+        h2 { margin: 0; color: var(--accent); font-size: 16px; }
         .icon { width: 28px; height: 28px; object-fit: contain; }
-        .gear-btn { background: none; border: none; cursor: pointer; color: #666; transition: transform 0.3s ease, color 0.3s; padding: 0; display: flex; align-items: center; }
-        .gear-btn:hover { transform: rotate(90deg); color: #0082c9; }
-        .back-btn { background: none; border: none; cursor: pointer; color: #0082c9; font-weight: bold; font-size: 14px; text-decoration: underline; padding: 0; margin-bottom: 15px; }
+        .gear-btn { background: none; border: none; cursor: pointer; color: var(--muted); transition: transform 0.3s ease, color 0.3s; padding: 0; display: flex; align-items: center; }
+        .gear-btn:hover { transform: rotate(90deg); color: var(--accent); }
+        .back-btn { background: none; border: none; cursor: pointer; color: var(--accent); font-weight: bold; font-size: 14px; padding: 0; margin-bottom: 10px; }
 
-        /* Views management */
+        /* Views */
         .view { display: none; }
         .view.active { display: block; }
 
         /* Form elements */
-        label { display: block; margin-top: 12px; font-size: 12px; font-weight: 600; color: #555; }
-        input, select { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; background: #fff; }
-        input:focus, select:focus { border-color: #0082c9; outline: none; box-shadow: 0 0 0 2px rgba(0, 130, 201, 0.2); }
+        label { display: block; margin-top: 12px; font-size: 12px; font-weight: 600; color: var(--label); }
+        input, select { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; background: var(--surface); color: var(--text); }
+        input:focus, select:focus, button:focus-visible, summary:focus-visible { border-color: var(--accent); outline: none; box-shadow: 0 0 0 2px rgba(0, 130, 201, 0.35); }
+        .password-row { display: flex; gap: 6px; align-items: stretch; }
+        .password-row input { flex: 1; }
+        .password-row button { margin-top: 4px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--accent); cursor: pointer; font-size: 12px; }
 
         /* Buttons */
-        .action-btn { width: 100%; padding: 12px; margin-top: 12px; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 14px; transition: opacity 0.2s; }
-        .action-btn:hover { opacity: 0.9; }
-        #pushBtn { background-color: #27ae60; }
-        #pullBtn { background-color: #e67e22; }
+        .action-btn { width: 100%; padding: 14px; margin-top: 4px; color: #fff; background-color: var(--button-bg); border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 15px; transition: background-color 0.2s; }
+        .action-btn:hover { background-color: var(--button-hover); }
+        .action-btn:disabled { opacity: 0.7; cursor: default; }
+        .secondary-btn { width: 100%; padding: 8px; margin-top: 10px; background: var(--surface); color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; }
+        .secondary-btn:hover { background: var(--accent-soft); }
+        .secondary-btn:disabled { opacity: 0.6; cursor: default; }
+        .link-btn { background: none; border: none; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font-size: 12px; }
+        a { color: var(--accent); }
 
-        /* Status message */
-        #status { margin-top: 15px; font-weight: bold; font-size: 13px; text-align: center; min-height: 16px; transition: color 0.3s; }
+        /* Automatic sync row */
+        .auto-row { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--divider); }
+        .auto-row label { display: flex; align-items: center; justify-content: space-between; cursor: pointer; margin: 0; font-size: 13px; color: var(--text); }
+        .auto-row input { width: auto; margin: 0 0 0 8px; transform: scale(1.2); }
+        .auto-state { margin-left: auto; font-size: 12px; font-weight: normal; color: var(--muted); }
+        .auto-state.on { color: var(--ok); }
 
-        /* Last sync line */
-        #lastSync { margin-top: 8px; font-size: 11px; color: #777; text-align: center; }
-        #lastSync.failed { color: #c0392b; }
-        .warning { margin-top: 10px; padding: 8px 10px; font-size: 11px; color: #8a5a00; background: #fff4e0; border: 1px solid #f0c987; border-radius: 6px; }
-        #version { margin-top: 12px; font-size: 10px; color: #aaa; text-align: right; }
+        /* Status, last sync, warnings */
+        #status { margin-top: 14px; font-weight: bold; font-size: 13px; text-align: center; min-height: 16px; }
+        #status.ok { color: var(--ok); }
+        #status.error { color: var(--error); }
+        #status.busy { color: var(--muted); }
+        #checkSettings { display: block; margin: 4px auto 0; }
+        #lastSync { margin-top: 8px; font-size: 11px; color: var(--muted); text-align: center; }
+        #lastSync.failed { color: var(--error); }
+        .warning { margin-top: 10px; padding: 8px 10px; font-size: 11px; color: var(--warn-text); background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 6px; }
+        #version { margin-top: 12px; font-size: 10px; color: var(--muted); text-align: right; }
 
         /* First-run setup card */
-        .setup-card { background: #eaf4fb; border: 1px solid #b6dcf2; border-radius: 6px; padding: 10px 12px; font-size: 12px; margin-bottom: 4px; }
-        .setup-card strong { color: #0082c9; }
+        .setup-card { background: var(--accent-soft); border: 1px solid var(--accent-border); border-radius: 6px; padding: 10px 12px; font-size: 12px; margin-bottom: 12px; }
+        .setup-card strong { color: var(--accent); }
         .setup-card ol { margin: 6px 0 8px; padding-left: 18px; }
         .setup-card li { margin-bottom: 3px; }
 
-        /* Help text and secondary actions in settings */
-        .hint { font-size: 11px; color: #777; margin: 4px 0 0; }
-        .hint code { font-size: 11px; }
-        .secondary-btn { width: 100%; padding: 8px; margin-top: 10px; background: #fff; color: #0082c9; border: 1px solid #0082c9; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; }
-        .secondary-btn:hover { background: #eaf4fb; }
-        #testResult { margin-top: 6px; font-size: 12px; font-weight: bold; min-height: 14px; }
-        a { color: #0082c9; }
-        .save-indicator { font-size: 11px; color: #27ae60; text-align: right; height: 14px; margin-top: 4px; opacity: 0; transition: opacity 0.3s; }
+        /* Settings */
+        h3 { margin: 0 0 4px; font-size: 14px; color: var(--accent); }
+        .hint { font-size: 11px; color: var(--muted); margin: 4px 0 0; }
+        .result { margin-top: 6px; font-size: 12px; font-weight: bold; min-height: 14px; }
+        .result.ok { color: var(--ok); }
+        .result.error { color: var(--error); }
+        .result.busy { color: var(--muted); }
+        .confirm-box { margin-top: 6px; }
+        .confirm-box .buttons { display: flex; gap: 6px; }
+        .confirm-box .secondary-btn { margin-top: 6px; }
+        details { margin-top: 16px; border-top: 1px solid var(--divider); padding-top: 10px; }
+        summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--label); }
+        .save-indicator { font-size: 11px; color: var(--ok); text-align: right; height: 14px; margin-top: 4px; opacity: 0; transition: opacity 0.3s; }
 
-        /* --- CROSS-BROWSER RANGE SLIDER STYLING --- */
-
-        /* Base reset for all browsers */
-        input[type="range"] {
-            -webkit-appearance: none;
-            -moz-appearance: none;
-            appearance: none;
-            width: 100%;
-            background: transparent;
-            margin: 10px 0;
-        }
-
-        input[type="range"]:focus {
-            outline: none;
-        }
-
-        /* === 1. WEBKIT (Brave, Chrome, Edge) === */
-
-        /* The track */
-        input[type="range"]::-webkit-slider-runnable-track {
-            width: 100%;
-            height: 6px;
-            background: #e0e0e0;
-            border-radius: 3px;
-            border: none;
-        }
-
-        /* The thumb */
-        input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            height: 18px;
-            width: 18px;
-            border-radius: 50%;
-            background: #0082c9;
-            cursor: pointer;
-            margin-top: -6px; /* Centers the thumb on WebKit */
-            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-        }
-
-        input[type="range"]::-webkit-slider-thumb:hover {
-            background: #006da8;
-        }
-
-        /* === 2. MOZILLA (Firefox) === */
-
-        /* The track */
-        input[type="range"]::-moz-range-track {
-            width: 100%;
-            height: 6px;
-            background: #e0e0e0;
-            border-radius: 3px;
-            border: none;
-        }
-
-        /* The thumb */
-        input[type="range"]::-moz-range-thumb {
-            height: 18px;
-            width: 18px;
-            border-radius: 50%;
-            background: #0082c9;
-            cursor: pointer;
-            border: none; /* Firefox adds an ugly default border, we remove it */
-            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-            /* Note: Firefox auto-centers the thumb, so no margin-top is needed here */
-        }
-
-        input[type="range"]::-moz-range-thumb:hover {
-            background: #006da8;
-        }
+        /* Range slider, Chromium and Firefox */
+        input[type="range"] { -webkit-appearance: none; -moz-appearance: none; appearance: none; width: 100%; background: transparent; margin: 10px 0; border: none; padding: 0; }
+        input[type="range"]:focus { outline: none; box-shadow: none; }
+        input[type="range"]::-webkit-slider-runnable-track { width: 100%; height: 6px; background: var(--track); border-radius: 3px; border: none; }
+        input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; height: 18px; width: 18px; border-radius: 50%; background: var(--accent); cursor: pointer; margin-top: -6px; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+        input[type="range"]::-moz-range-track { width: 100%; height: 6px; background: var(--track); border-radius: 3px; border: none; }
+        input[type="range"]::-moz-range-thumb { height: 18px; width: 18px; border-radius: 50%; background: var(--accent); cursor: pointer; border: none; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
     </style>
 </head>
 <body>
 
     <div class="header">
         <div class="logo-container">
-            <img src="icon48.png" alt="Nextcloud Bookmark Sync Logo" class="icon">
-            <h2>Nextcloud Bookmark Sync</h2>
+            <img src="icon48.png" alt="" class="icon">
+            <h2 data-i18n="extName">Nextcloud Bookmark Sync</h2>
         </div>
-        <button id="goToSettingsBtn" class="gear-btn" title="Settings">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <button id="goToSettingsBtn" class="gear-btn" data-i18n-title="settingsTitle" title="Settings" aria-label="Settings">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <circle cx="12" cy="12" r="3"></circle>
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
             </svg>
@@ -144,65 +152,89 @@
 
     <div id="mainView" class="view active">
         <div id="setupCard" class="setup-card" hidden>
-            <strong>Not set up yet</strong>
+            <strong data-i18n="setupTitle">Not set up yet</strong>
             <ol>
-                <li>In Nextcloud Files, create a folder for your bookmarks.</li>
-                <li>In Nextcloud, go to Settings › Security and create an app password.</li>
-                <li>Enter the folder's WebDAV URL, your username and the app password in the settings.</li>
+                <li data-i18n="setupStep1"></li>
+                <li data-i18n="setupStep2"></li>
+                <li data-i18n="setupStep3"></li>
             </ol>
-            <button id="openSettingsBtn" class="secondary-btn" style="margin-top: 0;">Open settings</button>
+            <button id="openSettingsBtn" class="secondary-btn" style="margin-top: 0;" data-i18n="openSettings">Open settings</button>
         </div>
 
-        <button id="pushBtn" class="action-btn">Export to Nextcloud</button>
-        <button id="pullBtn" class="action-btn">Import from Nextcloud</button>
+        <button id="syncBtn" class="action-btn" data-i18n="syncNow">Sync now</button>
 
-        <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #eee;">
-            <label style="display: flex; align-items: center; justify-content: space-between; cursor: pointer; margin: 0; font-size: 13px;">
-                <span style="font-weight: 600; color: #444;">🤖 Automatic Background Sync</span>
-                <input type="checkbox" id="autoSyncEnabled" style="width: auto; margin: 0; transform: scale(1.2);">
+        <div id="status" role="status" aria-live="polite"></div>
+        <button id="checkSettings" class="link-btn" hidden data-i18n="checkSettings">Check settings</button>
+        <div id="lastSync" aria-live="polite"></div>
+
+        <div class="auto-row">
+            <label>
+                <span data-i18n="autoSync">Automatic sync</span>
+                <span id="autoSyncState" class="auto-state"></span>
+                <input type="checkbox" id="autoSyncEnabled">
             </label>
         </div>
 
-        <div id="status"></div>
-        <div id="lastSync"></div>
-        <div id="legacyWarning" class="warning" hidden>⚠️ A device still runs version 1.5.1 or older: it overwrites changes made elsewhere. Update the extension on all your devices.</div>
+        <div id="legacyWarning" class="warning" hidden data-i18n="legacyWarning"></div>
         <div id="version"></div>
     </div>
 
     <div id="settingsView" class="view">
-        <button id="goToMainBtn" class="back-btn">← Back to Sync</button>
+        <button id="goToMainBtn" class="back-btn" data-i18n="backToSync">← Back</button>
 
-        <label for="serverUrl">Nextcloud Target Folder URL</label>
-        <input type="text" id="serverUrl" placeholder="https://[server]/remote.php/dav/files/[user]/[folder]/">
-        <p class="hint">Create the folder in Nextcloud Files first. Nextcloud shows the WebDAV address under Files › Files settings; add your folder name to it. Bookmarks are saved there as <code>bookmarks_sync.json</code> (this doesn't use the Nextcloud Bookmarks app).</p>
+        <label for="serverUrl" data-i18n="folderUrlLabel">Nextcloud folder URL (WebDAV)</label>
+        <input type="text" id="serverUrl" data-i18n-placeholder="folderUrlPlaceholder" autocomplete="off" spellcheck="false">
+        <p class="hint" data-i18n="folderUrlHint"></p>
 
-        <label for="username">Nextcloud Username</label>
-        <input type="text" id="username">
+        <label for="username" data-i18n="usernameLabel">Nextcloud username</label>
+        <input type="text" id="username" autocomplete="username" spellcheck="false">
 
-        <label for="password">App Password</label>
-        <input type="password" id="password">
-        <p class="hint">Create one in Nextcloud under Settings › Security. Don't use your main password.</p>
+        <label for="password" data-i18n="passwordLabel">App password</label>
+        <div class="password-row">
+            <input type="password" id="password" autocomplete="current-password">
+            <button id="togglePassword" type="button" aria-controls="password" data-i18n="showPassword">Show</button>
+        </div>
+        <p class="hint" data-i18n="passwordHint"></p>
 
-        <button id="testConnectionBtn" class="secondary-btn">Test connection</button>
-        <div id="testResult"></div>
-        <p class="hint"><a href="https://github.com/hollowbeam/nextcloud_bookmark_sync#setup-guide" target="_blank" rel="noopener">Setup help</a></p>
+        <button id="testConnectionBtn" class="secondary-btn" data-i18n="testConnection">Test connection</button>
+        <div id="testResult" class="result" role="status" aria-live="polite"></div>
+        <p class="hint"><a href="https://github.com/hollowbeam/nextcloud_bookmark_sync#setup-guide" target="_blank" rel="noopener" data-i18n="setupHelp">Setup help</a></p>
 
-        <label for="syncFrequency">Auto-Sync Frequency (Background)</label>
-        <select id="syncFrequency">
-            <option value="5">Every 5 minutes</option>
-            <option value="15" selected>Every 15 minutes</option>
-            <option value="30">Every 30 minutes</option>
+        <label for="syncFolder" data-i18n="syncedFolderLabel">Folder to sync</label>
+        <select id="syncFolder">
+            <option value="" data-i18n="defaultFolderOption">🔄 Bookmark Sync (default)</option>
         </select>
-        <p style="font-size: 11px; color: #777; margin-top: 4px; font-style: italic;">
-            Note: This frequency is only used if "Automatic Background Sync" is enabled on the main screen.
-        </p>
-        <label for="retentionDays">Archive Retention (1-30 days)</label>
-        <div style="display: flex; align-items: center; gap: 10px;">
-            <input type="range" id="retentionDays" min="1" max="30" value="30" style="flex: 1;">
-            <span id="daysValue">30 days</span>
+        <p class="hint" data-i18n="syncedFolderHint"></p>
+        <div id="folderConfirm" class="confirm-box warning" hidden>
+            <span data-i18n="folderChangeWarning"></span>
+            <div class="buttons">
+                <button id="confirmFolder" class="secondary-btn" data-i18n="confirmFolderChange">Use this folder</button>
+                <button id="cancelFolder" class="secondary-btn" data-i18n="cancel">Cancel</button>
+            </div>
         </div>
 
-        <div id="saveIndicator" class="save-indicator">Saved!</div>
+        <label for="syncFrequency" data-i18n="frequencyLabel">Automatic sync frequency</label>
+        <select id="syncFrequency">
+            <option value="5" data-i18n="every5">Every 5 minutes</option>
+            <option value="15" selected data-i18n="every15">Every 15 minutes</option>
+            <option value="30" data-i18n="every30">Every 30 minutes</option>
+        </select>
+        <p class="hint" data-i18n="frequencyHint"></p>
+
+        <label for="retentionDays" data-i18n="retentionLabel">Archive retention (1-30 days)</label>
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <input type="range" id="retentionDays" min="1" max="30" value="30" style="flex: 1;">
+            <span id="daysValue"></span>
+        </div>
+
+        <details>
+            <summary data-i18n="advancedTitle">Advanced</summary>
+            <button id="importBtn" class="secondary-btn" data-i18n="importOnly">Import only</button>
+            <p class="hint" data-i18n="importOnlyHint"></p>
+            <div id="importResult" class="result" role="status" aria-live="polite"></div>
+        </details>
+
+        <div id="saveIndicator" class="save-indicator" data-i18n="saved">Saved!</div>
     </div>
 
     <script src="popup.js"></script>

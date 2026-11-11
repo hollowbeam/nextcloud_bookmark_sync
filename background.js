@@ -33,27 +33,48 @@ let syncTimeout = null;
 let changedDuringSync = false; // A change in the sync folder while a sync ran
 
 // ==========================================
-// ERROR MESSAGES
+// MESSAGES
 // ==========================================
-// Shown in the popup: they must say what to fix, not just that something failed.
+// Shown in the popup, in the browser's language (_locales/): they must say what to
+// fix, not just that something failed.
+
+function t(key, ...substitutions) {
+    const text = chrome.i18n && chrome.i18n.getMessage(key, substitutions.map(String));
+    return text || key;
+}
 
 const SETUP_HINT_URL = "https://<server>/remote.php/dav/files/<user>/<folder>/";
-const NETWORK_ERROR_MESSAGE = "Server unreachable. Check the URL and your connection.";
-const BUSY_MESSAGE = "Another device is syncing.";
-const NO_ACCESS_MESSAGE = "No access to your Nextcloud server yet: click Test connection or Export in the popup to allow it.";
+const NETWORK_ERROR_MESSAGE = t('errUnreachable');
+const BUSY_MESSAGE = t('busy');
+const NO_ACCESS_MESSAGE = t('errNoAccess');
 
 function describeHttpStatus(status) {
-    if (status === 401) return "Wrong username or app password.";
-    if (status === 403) return "Access denied by the server.";
+    if (status === 401) return t('errWrongPassword');
+    if (status === 403) return t('errAccessDenied');
     // 404 on the folder, 409 when writing into a folder that doesn't exist
-    if (status === 404 || status === 409) return "Folder not found. Create it in Nextcloud Files first.";
-    if (status === 405 || status === 501) return `Not a WebDAV folder URL. Use ${SETUP_HINT_URL}`;
-    if (status === 507) return "Not enough storage space on the server.";
+    if (status === 404 || status === 409) return t('errFolderNotFound');
+    if (status === 405 || status === 501) return t('errNotWebDav', SETUP_HINT_URL);
+    if (status === 507) return t('errStorageFull');
     // Nextcloud's brute-force protection, after several wrong passwords
-    if (status === 429) return "Too many failed logins. Wait a moment, then check the app password.";
-    if (status >= 500) return `Nextcloud server error (HTTP ${status}).`;
-    return `Unexpected server response (HTTP ${status}).`;
+    if (status === 429) return t('errTooManyLogins');
+    if (status >= 500) return t('errServer', status);
+    return t('errUnexpected', status);
 }
+
+// What a sync changed, e.g. "2 added, 1 archived · changes sent", or "Up to date."
+function syncSummary(counts, sent) {
+    const parts = [];
+    if (counts.added > 0) parts.push(t('countAdded', counts.added));
+    if (counts.archived > 0) parts.push(t('countArchived', counts.archived));
+    if (counts.renamed > 0) parts.push(t('countRenamed', counts.renamed));
+    if (counts.skipped > 0) parts.push(t('countSkipped', counts.skipped));
+    if (parts.length === 0) return sent ? t('changesSentOnly') : t('upToDate');
+    const text = parts.join(', ');
+    const local = text.charAt(0).toUpperCase() + text.slice(1);
+    return sent ? `${local} · ${t('changesSent')}` : `${local}.`;
+}
+
+const NO_CHANGES = { added: 0, archived: 0, renamed: 0, skipped: 0 };
 
 // An error whose message can be shown as is. locked: transient, the sync is retried.
 class SyncError extends Error {
@@ -225,9 +246,26 @@ async function getBookmarksTreeAsync(folderId) {
 // ==========================================
 
 // Get or Create the main Sync Folder (Cross-browser safe)
+// The folder chosen in the settings, if it still exists (null otherwise)
+async function getChosenSyncFolderId() {
+    const { syncFolderId } = await new Promise(resolve => chrome.storage.local.get(['syncFolderId'], resolve));
+    if (!syncFolderId) return null;
+    const nodes = await new Promise(resolve => chrome.bookmarks.get(syncFolderId, (result) => {
+        void chrome.runtime.lastError; // Deleted meanwhile
+        resolve(result);
+    }));
+    if (nodes && nodes[0] && !nodes[0].url) return syncFolderId;
+    // Deleted: back to the default folder, rather than syncing nothing
+    chrome.storage.local.remove('syncFolderId');
+    return null;
+}
+
 // Returns { id, created }. created: the folder didn't exist (first use, or the user
 // deleted or renamed it). Its emptiness then says nothing about what to delete.
 async function getOrCreateSyncFolder() {
+    const chosenId = await getChosenSyncFolderId();
+    if (chosenId) return { id: chosenId, created: false };
+
     return new Promise((resolve) => {
         chrome.bookmarks.search({ title: SYNC_FOLDER_NAME }, (results) => {
             const folder = results.find(r => !r.url);
@@ -264,15 +302,19 @@ async function getOrCreateArchiveFolder(targetParentId, targetIndex) {
 
             if (folder) {
                 chrome.bookmarks.move(folder.id, { parentId: targetParentId, index: targetIndex }, (movedFolder) => {
-                    resolve(movedFolder.id);
+                    void chrome.runtime.lastError; // Can't go there: it stays where it is
+                    resolve(movedFolder ? movedFolder.id : folder.id);
                 });
                 return;
             }
 
             chrome.bookmarks.create({ parentId: targetParentId, index: targetIndex, title: ARCHIVE_FOLDER_NAME }, (newFolder) => {
                 if (chrome.runtime.lastError || !newFolder) {
-                    console.error("Archive creation error:", chrome.runtime.lastError);
-                    chrome.bookmarks.create({ title: ARCHIVE_FOLDER_NAME }, (fallback) => resolve(fallback.id));
+                    console.warn("Archive folder created in the browser's default place:", chrome.runtime.lastError);
+                    chrome.bookmarks.create({ title: ARCHIVE_FOLDER_NAME }, (fallback) => {
+                        void chrome.runtime.lastError;
+                        resolve(fallback ? fallback.id : null);
+                    });
                 } else {
                     resolve(newFolder.id);
                 }
@@ -309,6 +351,14 @@ function normalizeNode(node) {
     if (typeof node.url === 'string' && node.url) return { title, url: node.url };
     const children = Array.isArray(node.children) ? node.children.map(normalizeNode).filter(Boolean) : [];
     return { title, children };
+}
+
+function isArchiveFolder(node) {
+    return !node.url && node.title === ARCHIVE_FOLDER_NAME;
+}
+
+function withoutArchiveFolder(nodes) {
+    return nodes.filter(node => !isArchiveFolder(node));
 }
 
 function sameTree(a, b) {
@@ -396,16 +446,19 @@ function withoutSkipped(nodes, skipped) {
         .map(node => node.url ? node : { title: node.title, children: withoutSkipped(node.children, skipped) });
 }
 
-// The base is tied to the remote file: after a server change it would wrongly read as deletions
-function loadSyncBase(fileUrl) {
+// The base is tied to the remote file and to the synced folder: after a change of
+// server or folder, it would wrongly read as deletions. (Bases saved by 1.6.0 have
+// no folderId: they belong to the default folder.)
+function loadSyncBase(fileUrl, folderId) {
     return new Promise(resolve => chrome.storage.local.get([SYNC_BASE_KEY], (result) => {
         const saved = result[SYNC_BASE_KEY];
-        resolve(saved && saved.fileUrl === fileUrl ? saved.children : null);
+        const sameFolder = saved && (saved.folderId === undefined || saved.folderId === folderId);
+        resolve(saved && saved.fileUrl === fileUrl && sameFolder ? saved.children : null);
     }));
 }
 
-function saveSyncBase(fileUrl, children) {
-    return new Promise(resolve => chrome.storage.local.set({ [SYNC_BASE_KEY]: { fileUrl, children } }, resolve));
+function saveSyncBase(fileUrl, children, folderId) {
+    return new Promise(resolve => chrome.storage.local.set({ [SYNC_BASE_KEY]: { fileUrl, children, folderId } }, resolve));
 }
 
 // Compression proxies rewrite the ETag of the response they compress (nginx makes
@@ -442,7 +495,9 @@ async function fetchRemoteTree(fileUrl, authHeader) {
     // 1.6.0 and later write only titles, URLs and children; older versions upload the
     // browser's raw tree, with ids and dates
     const legacy = Boolean(valid && ('id' in data || 'dateAdded' in data));
-    return { exists: true, tree: valid ? normalizeNode(data) : null, etag, legacy };
+    const tree = valid ? normalizeNode(data) : null;
+    if (tree) tree.children = withoutArchiveFolder(tree.children);
+    return { exists: true, tree, etag, legacy };
 }
 
 // Remembers when a file from an old-version device was last seen: such a device
@@ -469,6 +524,7 @@ async function applyTreeToLocal(syncFolderId, targetNodes) {
 
     let addedCount = 0;
     let renamedCount = 0;
+    let archivedCount = 0;
     const skipped = new Set(); // Target nodes the browser refused to create
 
     const getChildrenAsync = (parentId) => {
@@ -492,7 +548,7 @@ async function applyTreeToLocal(syncFolderId, targetNodes) {
     // duplicate URLs/titles at the same level each match a distinct node
     // instead of every remote entry collapsing onto the first local match.
     async function syncNodes(remoteNodes, localParentId) {
-        const localChildren = await getChildrenAsync(localParentId);
+        const localChildren = (await getChildrenAsync(localParentId)).filter(node => !isArchiveFolder(node));
         const safeRemoteNodes = remoteNodes || [];
         const claimedIds = new Set();
         const matches = (local, remote) => remote.url ? local.url === remote.url : (!local.url && local.title === remote.title);
@@ -536,11 +592,12 @@ async function applyTreeToLocal(syncFolderId, targetNodes) {
                 await new Promise(resolve => {
                     chrome.bookmarks.move(localNode.id, { parentId: archiveFolderId }, resolve);
                 });
+                archivedCount++;
                 console.log(`🗑️ Archived missing item: ${localNode.title}`);
             }
         }
 
-        const freshLocalChildren = await getChildrenAsync(localParentId);
+        const freshLocalChildren = (await getChildrenAsync(localParentId)).filter(node => !isArchiveFolder(node));
         const usedForOrder = new Set();
         let position = 0; // Not the remote index: skipped nodes must not leave gaps
 
@@ -558,7 +615,10 @@ async function applyTreeToLocal(syncFolderId, targetNodes) {
     }
 
     await syncNodes(targetNodes, syncFolderId);
-    return { addedCount, renamedCount, skippedCount: skipped.size, skipped };
+    return {
+        counts: { added: addedCount, archived: archivedCount, renamed: renamedCount, skipped: skipped.size },
+        skipped,
+    };
 }
 
 // ==========================================
@@ -566,14 +626,14 @@ async function applyTreeToLocal(syncFolderId, targetNodes) {
 // ==========================================
 
 async function pushBookmarksToServer(sendResponse = () => {}) {
-    sendResponse = recordingResponse("export", sendResponse);
-    if (isSyncing) return sendResponse({ status: "locked", message: "Sync already in progress." });
+    sendResponse = recordingResponse("sync", sendResponse);
+    if (isSyncing) return sendResponse({ status: "locked", message: t('syncInProgress') });
     isSyncing = true;
 
     chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId'], async (result) => {
         if (!result.serverUrl || !result.username || !result.password || !result.extensionId) {
             isSyncing = false;
-            return sendResponse({ status: "error", message: "Not set up yet: open Settings (⚙️).", quiet: true });
+            return sendResponse({ status: "error", message: t('notSetUp'), quiet: true });
         }
 
         const { serverUrl, username, password, extensionId } = result;
@@ -595,14 +655,15 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
 
             const syncFolder = await getOrCreateSyncFolder();
             const syncFolderId = syncFolder.id;
-            if (!syncFolderId) throw new SyncError("Could not create the bookmark folder.");
+            if (!syncFolderId) throw new SyncError(t('errFolderCreate'));
 
             const local = normalizeNode(await getBookmarksTreeAsync(syncFolderId));
+            local.children = withoutArchiveFolder(local.children);
             const remote = await fetchRemoteTree(fileUrl, authHeader);
             noteRemoteFormat(remote);
             // A recreated folder is empty because it was deleted or renamed, not because
             // the user deleted every bookmark: without a base, the merge restores them
-            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl);
+            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl, syncFolderId);
 
             // Another device exported since our last sync: merge its changes instead
             // of overwriting them. Without a base (fresh install, new server) both
@@ -610,24 +671,24 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             // Devices updated from an older version get a base at update time.
             let uploadChildren = local.children;
             let skipped = null;
+            let counts = NO_CHANGES;
             const remoteChanged = remote.tree && !(savedBase && sameTree(remote.tree.children, savedBase));
             if (remoteChanged) {
                 uploadChildren = mergeChildren(savedBase, local.children, remote.tree.children);
                 if (!sameTree(uploadChildren, local.children)) {
-                    ({ skipped } = await applyTreeToLocal(syncFolderId, uploadChildren));
+                    ({ skipped, counts } = await applyTreeToLocal(syncFolderId, uploadChildren));
                 }
                 // The merge is applied locally: if the upload fails, the remote we read
                 // is the base, so its items aren't mistaken for local additions next time
-                await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped));
+                await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped), syncFolderId);
             }
 
             // Nothing new for the server: no upload, so no new ETag for other devices
             // to download, and less contention on the file. A file from an old-version
             // device is still rewritten, so it no longer reads as one.
             if (remote.tree && !remote.legacy && sameTree(uploadChildren, remote.tree.children)) {
-                await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped));
-                const message = remoteChanged ? "Remote changes applied, nothing new to send." : "Already up to date.";
-                return sendResponse({ status: "success", message });
+                await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped), syncFolderId);
+                return sendResponse({ status: "success", message: syncSummary(counts, false) });
             }
 
             const putFile = (conditionHeader) => davFetch(fileUrl, {
@@ -657,21 +718,20 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             }
 
             if (response.status === 412) {
-                return sendResponse({ status: "locked", message: "Remote file changed, try again." });
+                return sendResponse({ status: "locked", message: t('remoteChanged') });
             }
             if (response.status === 423) throw new SyncError(BUSY_MESSAGE, { locked: true });
             if (!response.ok) throw new SyncError(describeHttpStatus(response.status));
 
-            await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped));
+            await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped), syncFolderId);
             chrome.storage.local.set({ newFormatSeen: true });
 
-            console.log("🚀 Export successful!");
-            const mergedNote = remoteChanged ? " (merged with remote changes)" : "";
-            sendResponse({ status: "success", message: `Export successful!${mergedNote}` });
+            console.log("🚀 Sync successful!");
+            sendResponse({ status: "success", message: syncSummary(counts, true) });
 
         } catch (error) {
             console.error("PUSH Error:", error);
-            sendResponse(failureResponse(error, "Export failed."));
+            sendResponse(failureResponse(error, t('errSyncFailed')));
         } finally {
             await removeLock(baseUrl, authHeader, myLockFile);
             endSync();
@@ -685,13 +745,13 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
 
 async function pullBookmarksFromServer(sendResponse = () => {}) {
     sendResponse = recordingResponse("import", sendResponse);
-    if (isSyncing) return sendResponse({ status: "locked", message: "Sync already in progress." });
+    if (isSyncing) return sendResponse({ status: "locked", message: t('syncInProgress') });
     isSyncing = true;
 
     chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId'], async (result) => {
         if (!result.serverUrl || !result.username || !result.password || !result.extensionId) {
             isSyncing = false;
-            return sendResponse({ status: "error", message: "Not set up yet: open Settings (⚙️).", quiet: true });
+            return sendResponse({ status: "error", message: t('notSetUp'), quiet: true });
         }
 
         const { serverUrl, username, password, extensionId } = result;
@@ -716,40 +776,37 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             noteRemoteFormat(remote);
 
             if (!remote.tree) {
-                const message = remote.exists ? "Invalid remote file. Export to replace it." : "No bookmarks file on the server yet: export from a device first.";
+                const message = remote.exists ? t('invalidRemoteFile') : t('noRemoteFile');
                 // Normal before the first export: told in the popup, not flagged on the icon
                 return sendResponse({ status: "error", message, quiet: !remote.exists });
             }
 
             const syncFolder = await getOrCreateSyncFolder();
             const syncFolderId = syncFolder.id;
-            if (!syncFolderId) throw new SyncError("Could not create the bookmark folder.");
+            if (!syncFolderId) throw new SyncError(t('errFolderCreate'));
 
             // Local changes not exported yet are kept, not archived: only what was
             // deleted on the other side since our last sync goes to the archive
             const local = normalizeNode(await getBookmarksTreeAsync(syncFolderId));
-            // Without a base (first import, a new server, or a folder deleted or renamed
-            // and recreated empty) the server wins: the folder is restored from it
-            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl);
-            const base = savedBase || local.children;
-            const target = mergeChildren(base, local.children, remote.tree.children);
+            local.children = withoutArchiveFolder(local.children);
+            // Without a base (first sync, new server or folder, or a folder deleted and
+            // recreated) both sides are kept: nothing is archived, a deleted folder is
+            // restored, and a newly chosen folder keeps its bookmarks. Devices updated
+            // from 1.5.1 or older got a base at update time, so their deletions hold.
+            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl, syncFolderId);
+            const target = mergeChildren(savedBase, local.children, remote.tree.children);
 
-            const { addedCount, renamedCount, skippedCount, skipped } = await applyTreeToLocal(syncFolderId, target);
-            await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped));
+            const { counts, skipped } = await applyTreeToLocal(syncFolderId, target);
+            await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped), syncFolderId);
 
-            const notes = [];
-            if (renamedCount > 0) notes.push(`${renamedCount} renamed`);
-            if (skippedCount > 0) notes.push(`${skippedCount} skipped`);
-            const notesText = notes.length > 0 ? ` (${notes.join(', ')})` : '';
-            const itemWord = addedCount === 1 ? "item" : "items";
-            sendResponse({ status: "success", message: `${addedCount} ${itemWord} imported!${notesText}` });
+            sendResponse({ status: "success", message: syncSummary(counts, false) });
 
             // Kept local changes still have to reach the server
             exportNeeded = !sameTree(target, remote.tree.children) || remote.legacy;
 
         } catch (error) {
             console.error("PULL Error:", error);
-            sendResponse(failureResponse(error, "Import failed."));
+            sendResponse(failureResponse(error, t('errImportFailed')));
         } finally {
             // The lock goes before the sync ends: a sync starting in between would
             // otherwise have its fresh lock deleted. This also gives the bookmark
@@ -840,6 +897,8 @@ let cachedSyncFolderId = null;
 let syncFolderSearch = null; // In flight, shared by events arriving together
 
 async function findSyncFolderId() {
+    const chosenId = await getChosenSyncFolderId();
+    if (chosenId) return chosenId;
     if (cachedSyncFolderId) {
         const nodes = await new Promise(resolve => chrome.bookmarks.get(cachedSyncFolderId, (result) => {
             void chrome.runtime.lastError; // Removed meanwhile
@@ -947,7 +1006,7 @@ function recordingResponse(kind, sendResponse) {
 // the folder, and says precisely what is wrong
 async function testConnection({ serverUrl, username, password }) {
     if (!serverUrl || !username || !password) {
-        return { status: "error", message: "Fill in the folder URL, username and app password." };
+        return { status: "error", message: t('testFillIn') };
     }
 
     const baseUrl = serverUrl.endsWith('/') ? serverUrl : serverUrl + '/';
@@ -970,7 +1029,7 @@ async function testConnection({ serverUrl, username, password }) {
 
     if (response.status !== 207) {
         // A web page rather than WebDAV, e.g. the Nextcloud login or files page
-        if (response.ok) return { status: "error", message: `Not a WebDAV folder URL. Use ${SETUP_HINT_URL}` };
+        if (response.ok) return { status: "error", message: t('errNotWebDav', SETUP_HINT_URL) };
         return { status: "error", message: describeHttpStatus(response.status) };
     }
 
@@ -996,7 +1055,7 @@ async function testConnection({ serverUrl, username, password }) {
     const folderPath = decodeURIComponent(new URL(baseUrl).pathname).replace(/\/$/, '');
     const folderBlock = blocks.find(block => hrefPath(block) === folderPath) || blocks[0];
     if (!/<([a-z0-9]+:)?collection\s*\/>/i.test(folderBlock)) {
-        return { status: "error", message: "This URL points to a file. Use the URL of a folder." };
+        return { status: "error", message: t('testFileUrl') };
     }
 
     // An <href> ending with the file name, not e.g. old_bookmarks_sync.json or a .bak
@@ -1012,18 +1071,16 @@ async function testConnection({ serverUrl, username, password }) {
     };
     const folderRights = permissionsOf(folderBlock);
     if (folderRights !== null && !folderRights.includes('C')) {
-        return { status: "error", message: "Connected, but you can't create files in this folder (read-only share?): the extension needs to." };
+        return { status: "error", message: t('testNoCreate') };
     }
     const fileRights = permissionsOf(fileBlock);
     if (hasFile && fileRights !== null && !fileRights.includes('W')) {
-        return { status: "error", message: "Connected, but the bookmarks file in this folder is read-only for you." };
+        return { status: "error", message: t('testFileReadOnly') };
     }
 
     return {
         status: "success",
-        message: hasFile
-            ? "Connected. Bookmarks file found on the server."
-            : "Connected. No bookmarks file yet: Export creates it."
+        message: hasFile ? t('testConnectedFile') : t('testConnectedNoFile')
     };
 }
 
@@ -1038,7 +1095,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             .then(sendResponse)
             .catch(() => sendResponse({ status: "error", message: NETWORK_ERROR_MESSAGE }));
         return true;
-    } else if (request.action === "push_bookmarks") {
+    } else if (request.action === "sync_now" || request.action === "push_bookmarks") {
         pushBookmarksToServer(sendResponse);
         return true;
     } else if (request.action === "pull_bookmarks") {
@@ -1088,7 +1145,7 @@ async function seedSyncBaseAfterUpdate() {
     if (!folder) return;
 
     const local = normalizeNode(await getBookmarksTreeAsync(folder.id));
-    await saveSyncBase(fileUrl, local.children);
+    await saveSyncBase(fileUrl, withoutArchiveFolder(local.children), folder.id);
 }
 
 chrome.runtime.onInstalled.addListener((details) => {

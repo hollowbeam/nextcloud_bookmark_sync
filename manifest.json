@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "Nextcloud Bookmark Sync",
+  "name": "__MSG_extName__",
   "version": "1.7.0",
-  "description": "Cross-browser bookmark synchronization via Nextcloud WebDAV.",
+  "description": "__MSG_extDescription__",
+  "default_locale": "en",
   "permissions": [
     "bookmarks",
     "storage",
@@ -21,7 +22,9 @@
   },
   "background": {
     "service_worker": "background.js",
-    "scripts": ["background.js"]
+    "scripts": [
+      "background.js"
+    ]
   },
   "icons": {
     "48": "icon48.png",
@@ -31,7 +34,9 @@
     "gecko": {
       "id": "nextcloud-bookmark-sync@hollow.ovh",
       "data_collection_permissions": {
-        "required": ["none"]
+        "required": [
+          "none"
+        ]
       }
     }
   }

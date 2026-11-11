@@ -11,6 +11,18 @@ const repo = path.join(__dirname, '..');
 const backgroundSrc = fs.readFileSync(path.join(repo, 'background.js'), 'utf8');
 const popupSrc = fs.readFileSync(path.join(repo, 'popup.js'), 'utf8');
 
+// chrome.i18n with the English messages, so tests read the texts users see
+const EN = JSON.parse(fs.readFileSync(path.join(repo, '_locales', 'en', 'messages.json'), 'utf8'));
+const i18n = {
+    getMessage: (key, subs = []) => (EN[key] ? EN[key].message.replace(/\$(\d)/g, (m, n) => (subs[n - 1] !== undefined ? subs[n - 1] : '')) : ''),
+    getUILanguage: () => 'en',
+};
+const FR = JSON.parse(fs.readFileSync(path.join(repo, '_locales', 'fr', 'messages.json'), 'utf8'));
+const i18nFr = {
+    getMessage: (key, subs = []) => (FR[key] ? FR[key].message.replace(/\$(\d)/g, (m, n) => (subs[n - 1] !== undefined ? subs[n - 1] : '')) : ''),
+    getUILanguage: () => 'fr',
+};
+
 const STORAGE = { serverUrl: 'https://cloud.example/dav', username: 'u', password: 'p', extensionId: 'chrome11111111', autoSyncEnabled: true };
 const LOCK_URL = 'https://cloud.example/dav/bookmarks_sync.lock';
 const JSON_URL = 'https://cloud.example/dav/bookmarks_sync.json';
@@ -29,7 +41,7 @@ function makeBookmarks(runtime) {
         moves,
         nodes,
         search: ({ title }, cb) => setImmediate(() => cb([...nodes.values()].filter(n => n.title === title).map(view))),
-        get: (id, cb) => setImmediate(() => cb([view(nodes.get(id))])),
+        get: (id, cb) => setImmediate(() => (nodes.has(id) ? cb([view(nodes.get(id))]) : fail(cb, "Can't find bookmark for id."))),
         getChildren: (id, cb) => setImmediate(() => cb(nodes.get(id).children.map(c => view(nodes.get(c))))),
         getSubTree: (id, cb) => setImmediate(() => {
             const build = (n) => ({ ...view(n), children: n.children ? n.children.map(c => build(nodes.get(c))) : undefined });
@@ -68,7 +80,7 @@ function makeBookmarks(runtime) {
     return api;
 }
 
-function loadBackground(server) {
+function loadBackground(server, { locale = i18n } = {}) {
     const runtime = { lastError: undefined, onMessage: { addListener() {} }, onInstalled: { addListener(f) { runtime.installed = f; } } };
     const bookmarks = makeBookmarks(runtime);
     const timers = [];
@@ -93,7 +105,7 @@ function loadBackground(server) {
     const alarms = {};
     const sandbox = {
         chrome: {
-            runtime, bookmarks,
+            runtime, bookmarks, i18n: locale,
             storage: {
                 local: {
                     get: (k, cb) => setImmediate(() => cb({ ...store })),
@@ -340,7 +352,7 @@ test('pull: refused entries are skipped and counted, positions stay contiguous',
     const res = await b.call('pullBookmarksFromServer');
     await b.flush();
     assert.strictEqual(res.status, 'success', res.message);
-    assert.strictEqual(res.message, '2 items imported! (2 skipped)');
+    assert.strictEqual(res.message, '2 added, 2 skipped.');
     const titles = b.bookmarks.nodes.get(id).children.map(c => b.bookmarks.nodes.get(c).title);
     assert.deepStrictEqual(titles, ['A', 'B']);
     assert.deepStrictEqual(b.bookmarks.moves.map(m => m.index), [0, 1]);
@@ -355,7 +367,7 @@ test('pull: plain message when nothing is skipped, lock released at the end', as
     await b.seed();
     const res = await b.call('pullBookmarksFromServer');
     await b.flush();
-    assert.strictEqual(res.message, '1 item imported!');
+    assert.strictEqual(res.message, '1 added.');
     assert.strictEqual(b.log[b.log.length - 1], 'DELETE bookmarks_sync.lock');
     assert.ok(!b.timers.some(t => t.ms === 2000), 'delayed lock removal still scheduled');
 });
@@ -461,7 +473,7 @@ test("push: merges another device's export instead of overwriting it", async () 
     const res = await b.call('pushBookmarksToServer');
     await b.flush();
     assert.strictEqual(res.status, 'success', res.message);
-    assert.match(res.message, /merged/);
+    assert.strictEqual(res.message, '1 added · changes sent');
     assert.deepStrictEqual(titles(state.remote.children), ['A', 'L', 'R']);
     assert.deepStrictEqual(b.titlesIn(id), ['A', 'L', 'R']);
     assert.strictEqual(state.headers['If-Match'], '"v1"');
@@ -481,7 +493,7 @@ test('push: uploads local as is when the remote is unchanged since the last sync
     const state = { remote: { title: 'root', children: [bm('A'), bm('B')] } };
     const { b } = await deviceWith(state, [bm('A'), bm('B')], [bm('A')]);
     const res = await b.call('pushBookmarksToServer');
-    assert.strictEqual(res.message, 'Export successful!');
+    assert.strictEqual(res.message, 'Changes sent.');
     assert.deepStrictEqual(titles(state.remote.children), ['A']);
 });
 
@@ -644,7 +656,7 @@ test('pull: archives what the other device deleted, applies its renames', async 
     const state = { remote: { title: 'root', children: [bm('A2', 'https://a.example/')] } };
     const { b, id } = await deviceWith(state, [bm('A'), bm('B')], [bm('A'), bm('B')]);
     const res = await b.call('pullBookmarksFromServer');
-    assert.strictEqual(res.message, '0 items imported! (1 renamed)');
+    assert.strictEqual(res.message, '1 archived, 1 renamed.');
     await b.flush();
     assert.deepStrictEqual(b.titlesIn(id), ['A2']);
     assert.ok(!b.timers.some(t => t.ms === 5000), 'useless export scheduled');
@@ -701,17 +713,18 @@ test('pull: an invalid remote file is reported, nothing changes locally', async 
     const id = await b.seed();
     await b.addLocal(id, 'A', bm('A').url);
     const res = await b.call('pullBookmarksFromServer');
-    assert.strictEqual(res.message, 'Invalid remote file. Export to replace it.');
+    assert.strictEqual(res.message, 'The bookmarks file on the server is invalid. Sync now to replace it.');
     assert.deepStrictEqual(b.titlesIn(id), ['A']);
 });
 
-test('pull: without a base the server wins (no resurrection of remote deletions)', async () => {
+test('pull: without a base both sides are kept, nothing is archived', async () => {
     const state = { remote: { title: 'root', children: [bm('A'), bm('R')] } };
     const { b, id } = await deviceWith(state, null, [bm('A'), bm('X')]);
-    await b.call('pullBookmarksFromServer');
+    const res = await b.call('pullBookmarksFromServer');
     await b.flush();
-    assert.deepStrictEqual(b.titlesIn(id), ['A', 'R']);
-    assert.ok(!b.timers.some(t => t.ms === 5000), 'X would be pushed back');
+    assert.strictEqual(res.message, '1 added.');
+    assert.deepStrictEqual(b.titlesIn(id), ['A', 'R', 'X']);
+    assert.ok(b.timers.some(t => t.ms === 5000), 'X not scheduled for export');
 });
 
 test('pull: a local reorder survives when the remote order is unchanged', async () => {
@@ -787,7 +800,7 @@ test('errors: an import against a missing file explains what to do', async () =>
     const b = loadBackground(noLock);
     await b.seed();
     const res = await b.call('pullBookmarksFromServer');
-    assert.strictEqual(res.message, 'No bookmarks file on the server yet: export from a device first.');
+    assert.strictEqual(res.message, 'No bookmarks file on the server yet: sync from a device first.');
 });
 
 test('errors: syncing before setup points to the settings', async () => {
@@ -803,7 +816,7 @@ test('status: a failed sync is recorded and flagged on the icon, a success clear
     await b.seed();
     await b.call('pushBookmarksToServer');
     await b.flush();
-    assert.strictEqual(b.store.lastSync.kind, 'export');
+    assert.strictEqual(b.store.lastSync.kind, 'sync');
     assert.strictEqual(b.store.lastSync.ok, false);
     assert.strictEqual(b.store.lastSync.message, 'Wrong username or app password.');
     assert.strictEqual(b.badge.text, '!');
@@ -832,7 +845,7 @@ test('connection test: a reachable folder, with or without the bookmarks file', 
     let r = await testConnection(propfind(207, FOLDER + '<d:response><d:href>/dav/bookmarks_sync.json</d:href></d:response></d:multistatus>'));
     assert.deepStrictEqual([r.status, r.message], ['success', 'Connected. Bookmarks file found on the server.']);
     r = await testConnection(propfind(207, FOLDER + '</d:multistatus>'));
-    assert.deepStrictEqual([r.status, r.message], ['success', 'Connected. No bookmarks file yet: Export creates it.']);
+    assert.deepStrictEqual([r.status, r.message], ['success', 'Connected. No bookmarks file yet: Sync now creates it.']);
 });
 
 test('connection test: each problem gets its own message', async () => {
@@ -927,7 +940,7 @@ test('connection test: other files with a similar name are not the bookmarks fil
     const body = FOLDER + '<d:response><d:href>/dav/old_bookmarks_sync.json</d:href></d:response>'
         + '<d:response><d:href>/dav/bookmarks_sync.json.bak</d:href></d:response></d:multistatus>';
     const r = await testConnection(propfind(207, body));
-    assert.strictEqual(r.message, 'Connected. No bookmarks file yet: Export creates it.');
+    assert.strictEqual(r.message, 'Connected. No bookmarks file yet: Sync now creates it.');
 });
 
 
@@ -941,7 +954,7 @@ test('push: nothing new for the server means no upload', async () => {
     const { b } = await deviceWith(state, [bm('A')], [bm('A')]);
     const res = await b.call('pushBookmarksToServer');
     await b.flush();
-    assert.deepStrictEqual([res.status, res.message], ['success', 'Already up to date.']);
+    assert.deepStrictEqual([res.status, res.message], ['success', 'Up to date.']);
     assert.strictEqual(state.puts, undefined);
     assert.strictEqual(b.log[b.log.length - 1], 'DELETE bookmarks_sync.lock');
 });
@@ -951,7 +964,7 @@ test('push: remote changes applied locally with nothing to send back skip the up
     const { b, id } = await deviceWith(state, [bm('A')], [bm('A')]);
     const res = await b.call('pushBookmarksToServer');
     await b.flush();
-    assert.strictEqual(res.message, 'Remote changes applied, nothing new to send.');
+    assert.strictEqual(res.message, '1 added.');
     assert.strictEqual(state.puts, undefined);
     assert.deepStrictEqual(b.titlesIn(id), ['A', 'R']);
     assert.deepStrictEqual(titles(b.store.syncBase.children), ['A', 'R']);
@@ -1102,18 +1115,127 @@ test('connection test: asks for the permissions in the PROPFIND body', async () 
     assert.strictEqual(sent.headers['Content-Type'], 'application/xml');
 });
 
+
+// ------------------------------------------------------------------
+// Messages, folder choice, archive folder, translations
+// ------------------------------------------------------------------
+
+test('messages: the sync says what changed on each side', async () => {
+    const summary = (counts, sent) => loadBackground(noLock).sandbox.syncSummary({ added: 0, archived: 0, renamed: 0, skipped: 0, ...counts }, sent);
+    assert.strictEqual(summary({}, false), 'Up to date.');
+    assert.strictEqual(summary({}, true), 'Changes sent.');
+    assert.strictEqual(summary({ added: 2, archived: 1 }, true), '2 added, 1 archived · changes sent');
+    assert.strictEqual(summary({ renamed: 1, skipped: 3 }, false), '1 renamed, 3 skipped.');
+});
+
+test('messages: shown in French in a French browser', async () => {
+    const b = loadBackground(lockGet({ status: 401 }), { locale: i18nFr });
+    await b.seed();
+    const res = await b.call('pushBookmarksToServer');
+    assert.strictEqual(res.message, "Identifiant ou mot de passe d'application incorrect.");
+    assert.strictEqual(b.sandbox.syncSummary({ added: 2, archived: 0, renamed: 0, skipped: 0 }, true), 'Ajoutés : 2 · modifications envoyées');
+});
+
+test('translations: English and French have the same keys and placeholders', () => {
+    assert.deepStrictEqual(Object.keys(FR).sort(), Object.keys(EN).sort());
+    for (const key of Object.keys(EN)) {
+        const holes = (m) => (m.match(/\$\d/g) || []).sort().join();
+        assert.strictEqual(holes(FR[key].message), holes(EN[key].message), key);
+    }
+});
+
+test('folder: a chosen folder is synced instead of the default one', async () => {
+    const state = { remote: null };
+    const b = loadBackground(davServer(state));
+    await b.seed(); // the default folder exists but isn't chosen
+    const work = await b.addLocal('1', 'Work');
+    await b.addLocal(work.id, 'W', 'https://w.example/');
+    b.store.syncFolderId = work.id;
+    const res = await b.call('pushBookmarksToServer');
+    assert.strictEqual(res.status, 'success', res.message);
+    assert.deepStrictEqual(titles(state.remote.children), ['W']);
+});
+
+test('folder: a newly chosen folder keeps its bookmarks and gets the server ones', async () => {
+    const state = { remote: { title: 'root', children: [bm('A'), bm('B')] } };
+    const b = loadBackground(davServer(state));
+    const syncId = await b.seed();
+    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A'), bm('B')], folderId: syncId };
+    const work = await b.addLocal('1', 'Work');
+    await b.addLocal(work.id, 'W', 'https://w.example/');
+    b.store.syncFolderId = work.id;
+    // With the old folder's base, W would be "added" and A, B... fine, but a base
+    // from another folder must never read as deletions: the union is expected
+    const res = await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual(res.status, 'success', res.message);
+    assert.deepStrictEqual(b.titlesIn(work.id).sort(), ['A', 'B', 'W']);
+    assert.ok(!b.bookmarks.nodes.get('1').children.some(id => b.bookmarks.nodes.get(id).title === '🗑️ Bookmark Archives'), 'something was archived');
+});
+
+test('folder: a base saved for the default folder is not used for a chosen one', async () => {
+    const b = loadBackground(noLock);
+    const syncId = await b.seed();
+    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A')], folderId: syncId };
+    assert.strictEqual(await b.sandbox.loadSyncBase(JSON_URL, 'other-folder'), null);
+    assert.ok(await b.sandbox.loadSyncBase(JSON_URL, syncId));
+    // A base saved by 1.6.0 (no folderId) belongs to whatever folder is synced
+    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A')] };
+    assert.ok(await b.sandbox.loadSyncBase(JSON_URL, syncId));
+});
+
+test('folder: a chosen folder that was deleted falls back to the default one', async () => {
+    const b = loadBackground(noLock);
+    b.store.syncFolderId = 'gone';
+    const folder = await b.sandbox.getOrCreateSyncFolder();
+    assert.strictEqual(b.bookmarks.nodes.get(folder.id).title, '🔄 Bookmark Sync');
+    assert.strictEqual(b.store.syncFolderId, undefined);
+});
+
+test('archive: the archive folder inside a synced folder is never synced or archived', async () => {
+    const state = { remote: { title: 'root', children: [bm('A')] } };
+    const b = loadBackground(davServer(state));
+    // The bookmarks bar itself is synced, and holds the archive folder
+    const archive = await b.addLocal('1', '🗑️ Bookmark Archives');
+    await b.addLocal(archive.id, 'Old', 'https://old.example/');
+    await b.addLocal('1', 'A', bm('A').url);
+    await b.addLocal('1', 'L', bm('L').url);
+    b.store.syncFolderId = '1';
+    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A')], folderId: '1' };
+    const res = await b.call('pushBookmarksToServer');
+    await b.flush();
+    assert.strictEqual(res.status, 'success', res.message);
+    assert.deepStrictEqual(titles(state.remote.children), ['A', 'L']);
+    assert.ok(b.bookmarks.nodes.get('1').children.includes(archive.id), 'archive folder moved or archived');
+});
+
+test('archive: a top-level synced folder still gets an archive (browser default place)', async () => {
+    const state = { remote: { title: 'root', children: [] } };
+    const b = loadBackground(davServer(state));
+    await b.addLocal('1', 'X', 'https://x.example/');
+    b.store.syncFolderId = '1';
+    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('X', 'https://x.example/')], folderId: '1' };
+    const res = await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual(res.status, 'success', res.message);
+    assert.strictEqual(res.message, '1 archived.');
+});
+
 // ------------------------------------------------------------------
 // Popup
 // ------------------------------------------------------------------
 
 // Loads popup.js against a fake DOM, fills the fields, clicks a button.
 // response is what the background script answers.
-async function popup(serverUrl, { button = 'pushBtn', fields = {}, response = { status: 'success', message: 'ok' }, stored = {} } = {}) {
+async function popup(serverUrl, { button = 'syncBtn', fields = {}, response = { status: 'success', message: 'ok' }, stored = {}, tree = null, click = true } = {}) {
+    const writes = [];
+    const removed = [];
     const els = new Map();
     const el = (id) => {
         if (!els.has(id)) {
             const listeners = {};
-            els.set(id, new Proxy({ id, value: '', textContent: '', style: {}, listeners,
+            els.set(id, new Proxy({ id, value: '', textContent: '', className: '', style: {}, listeners,
+                classList: { toggle() {}, add() {}, remove() {} },
                 addEventListener: (t, f) => { listeners[t] = f; } }, {
                 get: (o, k) => (k in o ? o[k] : (typeof k === 'string' ? () => undefined : undefined)),
                 set: (o, k, v) => { o[k] = v; return true; },
@@ -1126,11 +1248,20 @@ async function popup(serverUrl, { button = 'pushBtn', fields = {}, response = { 
     const sent = [];
     const messages = [];
     const sandbox = {
-        document: { getElementById: el, addEventListener: (t, f) => { if (t === 'DOMContentLoaded') ready = f; }, querySelectorAll: () => [], querySelector: () => el('q') },
+        document: { getElementById: el, documentElement: {}, createElement: () => ({}), addEventListener: (t, f) => { if (t === 'DOMContentLoaded') ready = f; }, querySelectorAll: () => [], querySelector: () => el('q') },
         window: { addEventListener() {} }, navigator: { userAgent: 'test', brave: undefined },
-        console: { log() {}, warn() {}, error() {} }, setTimeout: () => 0, clearTimeout() {}, URL, Math, parseInt, Promise, Date, Boolean,
+        console: { log() {}, warn() {}, error() {} }, setTimeout: () => 0, clearTimeout() {}, URL, Math, parseInt, Promise, Date, Boolean, Intl, Number, String,
         chrome: {
-            storage: { local: { get: (k, cb) => cb({ ...stored }), set: (o, cb) => cb && cb() }, onChanged: { addListener() {} } },
+            i18n,
+            storage: {
+                local: {
+                    get: (k, cb) => cb({ ...stored }),
+                    set: (o, cb) => { writes.push(o); if (cb) cb(); },
+                    remove: (k, cb) => { removed.push(k); if (cb) cb(); },
+                },
+                onChanged: { addListener() {} },
+            },
+            bookmarks: tree ? { getTree: (cb) => cb(tree) } : undefined,
             permissions: { request: (p, cb) => { requests.push(p.origins[0]); cb(true); } },
             runtime: {
                 sendMessage: (m, cb) => { sent.push(m.action); messages.push(m); if (cb) cb(response); },
@@ -1144,7 +1275,7 @@ async function popup(serverUrl, { button = 'pushBtn', fields = {}, response = { 
     await new Promise(r => setTimeout(r, 20));
     el('serverUrl').value = serverUrl;
     for (const [id, value] of Object.entries(fields)) el(id).value = value;
-    await el(button).listeners.click();
+    if (click) await el(button).listeners.click();
     return {
         requests, sent, messages,
         status: el('status').textContent,
@@ -1152,6 +1283,7 @@ async function popup(serverUrl, { button = 'pushBtn', fields = {}, response = { 
         setupHidden: el('setupCard').hidden,
         lastSync: el('lastSync').textContent,
         legacyHidden: el('legacyWarning').hidden,
+        writes, removed, sandbox,
         version: el('version').textContent,
         el,
     };
@@ -1160,7 +1292,7 @@ async function popup(serverUrl, { button = 'pushBtn', fields = {}, response = { 
 test('popup: the port is dropped from the permission pattern', async () => {
     const r = await popup('https://cloud.example:8443/remote.php/dav/');
     assert.deepStrictEqual(r.requests, ['https://cloud.example/*']);
-    assert.deepStrictEqual(r.sent, ['push_bookmarks']);
+    assert.deepStrictEqual(r.sent, ['sync_now']);
 });
 
 test('popup: http is refused with a clear message, without a permission request', async () => {
@@ -1188,22 +1320,24 @@ test('popup: the setup card shows until the URL, username and password are saved
 });
 
 test('popup: the last sync result is shown, failures with their reason', async () => {
-    const failed = await popup('', { stored: { lastSync: { kind: 'export', ok: false, message: 'Wrong username or app password.', time: Date.now() } } });
-    assert.match(failed.lastSync, /^Last export failed \(.+\): Wrong username or app password\.$/);
-    const ok = await popup('', { stored: { lastSync: { kind: 'import', ok: true, message: '1 item imported!', time: Date.now() } } });
-    assert.match(ok.lastSync, /^Last sync: Import OK, /);
+    const failed = await popup('', { stored: { lastSync: { kind: 'sync', ok: false, message: 'Wrong username or app password.', time: Date.now() } } });
+    assert.strictEqual(failed.lastSync, 'Last sync failed (just now): Wrong username or app password.');
+    const ok = await popup('', { stored: { lastSync: { kind: 'sync', ok: true, message: 'Up to date.', time: Date.now() - 5 * 60000 } } });
+    assert.strictEqual(ok.lastSync, '✓ Synced 5 minutes ago');
+    const imported = await popup('', { stored: { lastSync: { kind: 'import', ok: true, message: '1 added.', time: Date.now() - 2 * 3600000 } } });
+    assert.strictEqual(imported.lastSync, '✓ Imported 2 hours ago');
 });
 
 test('popup: test connection sends the typed values, not the saved ones', async () => {
     const r = await popup('https://cloud.example/dav/f/', {
         button: 'testConnectionBtn',
         fields: { username: ' alice ', password: 'secret' },
-        response: { status: 'success', message: 'Connected. No bookmarks file yet: Export creates it.' },
+        response: { status: 'success', message: 'Connected. No bookmarks file yet: Sync now creates it.' },
     });
     assert.deepStrictEqual(r.requests, ['https://cloud.example/*']);
     assert.deepStrictEqual(JSON.parse(JSON.stringify(r.messages[0])),
         { action: 'test_connection', serverUrl: 'https://cloud.example/dav/f/', username: 'alice', password: 'secret' });
-    assert.strictEqual(r.testResult, 'Connected. No bookmarks file yet: Export creates it.');
+    assert.strictEqual(r.testResult, 'Connected. No bookmarks file yet: Sync now creates it.');
 });
 
 test('popup: test connection reports a bad URL without contacting the server', async () => {
@@ -1284,4 +1418,68 @@ test('folder: created in the bookmarks bar in Chrome and in Firefox', async () =
     folder = await b.sandbox.getOrCreateSyncFolder();
     assert.strictEqual(nodes.get(folder.id).parentId, 'toolbar_____');
     assert.strictEqual(folder.created, true);
+});
+
+test('popup: Import only (advanced settings) sends an import and shows its result there', async () => {
+    const r = await popup('https://cloud.example/dav/', { button: 'importBtn', response: { status: 'success', message: '1 added.' } });
+    assert.deepStrictEqual(r.sent, ['pull_bookmarks']);
+    assert.strictEqual(r.el('importResult').textContent, '1 added.');
+    assert.strictEqual(r.status, '');
+});
+
+test('popup: a failed sync stays on screen with a link to the settings', async () => {
+    const r = await popup('https://cloud.example/dav/', { response: { status: 'error', message: 'Wrong username or app password.' } });
+    assert.strictEqual(r.status, 'Wrong username or app password.');
+    assert.strictEqual(r.el('checkSettings').hidden, false);
+    const ok = await popup('https://cloud.example/dav/', { response: { status: 'success', message: 'Up to date.' } });
+    assert.strictEqual(ok.el('checkSettings').hidden, true);
+});
+
+test('popup: the password can be shown and hidden', async () => {
+    const r = await popup('', { click: false });
+    r.el('password').type = 'password';
+    r.el('togglePassword').listeners.click();
+    assert.strictEqual(r.el('password').type, 'text');
+    assert.strictEqual(r.el('togglePassword').textContent, 'Hide');
+    r.el('togglePassword').listeners.click();
+    assert.strictEqual(r.el('password').type, 'password');
+});
+
+test('popup: the automatic sync state reads On or Paused', async () => {
+    const on = await popup('', { click: false });
+    assert.strictEqual(on.el('autoSyncState').textContent, 'On');
+    const paused = await popup('', { click: false, stored: { autoSyncEnabled: false } });
+    assert.strictEqual(paused.el('autoSyncState').textContent, 'Paused');
+});
+
+test('popup: changing the synced folder asks first, then saves it', async () => {
+    const tree = [{ id: '0', children: [{ id: '1', parentId: '0', title: 'Bookmarks bar', children: [
+        { id: '7', parentId: '1', title: 'Work', children: [] },
+        { id: '8', parentId: '1', title: '🔄 Bookmark Sync', children: [] },
+    ] }] }];
+    const r = await popup('', { click: false, tree });
+    const select = r.el('syncFolder');
+    select.value = '7';
+    select.listeners.change();
+    assert.strictEqual(r.el('folderConfirm').hidden, false, 'no confirmation asked');
+    assert.deepStrictEqual(r.writes.filter(w => 'syncFolderId' in w), []);
+    r.el('confirmFolder').listeners.click();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(r.writes.filter(w => 'syncFolderId' in w))), [{ syncFolderId: '7' }]);
+    // Back to the default folder: the setting is removed
+    select.value = '';
+    select.listeners.change();
+    r.el('confirmFolder').listeners.click();
+    assert.deepStrictEqual(r.removed, ['syncFolderId']);
+});
+
+test('popup: cancelling a folder change keeps the current folder', async () => {
+    const tree = [{ id: '0', children: [{ id: '1', parentId: '0', title: 'Bookmarks bar', children: [] }] }];
+    const r = await popup('', { click: false, tree });
+    const select = r.el('syncFolder');
+    select.value = '1';
+    select.listeners.change();
+    r.el('cancelFolder').listeners.click();
+    assert.strictEqual(select.value, '');
+    assert.strictEqual(r.el('folderConfirm').hidden, true);
+    assert.deepStrictEqual(r.writes.filter(w => 'syncFolderId' in w), []);
 });
