@@ -25,7 +25,10 @@ Before using this extension, you will need:
 
 ## 🚀 Installation
 
-*Note: Official links to the Chrome Web Store and Mozilla Add-ons will be added here once the extension is published.*
+**From the stores (recommended):**
+
+* **Chrome / Brave / Edge:** [Chrome Web Store](https://chromewebstore.google.com/detail/nextcloud-bookmark-sync/khfpengpkhgddoglikfbmbacpgokjnpo)
+* **Firefox:** [Firefox Add-ons](https://addons.mozilla.org/firefox/addon/nextcloud-bookmark-sync/)
 
 **Manual Installation (Developer Mode):**
 
