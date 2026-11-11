@@ -240,9 +240,22 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const RED = "#c0392b";
 
+    // Reads the background's answer; a missing one (e.g. a closed port) reads as an error
+    function backgroundResponse(response) {
+        if (chrome.runtime.lastError) console.warn(chrome.runtime.lastError.message);
+        return response || { status: "error", message: "Error." };
+    }
+
+    // A result for other values is misleading once a field changes
+    const testResult = document.getElementById('testResult');
+    ['serverUrl', 'username', 'password'].forEach(id => {
+        document.getElementById(id).addEventListener('input', () => { testResult.textContent = ''; });
+    });
+
     // 7. Connection test (Settings View): uses the values typed, even if not saved yet
-    document.getElementById('testConnectionBtn').addEventListener('click', async () => {
-        const result = document.getElementById('testResult');
+    const testBtn = document.getElementById('testConnectionBtn');
+    testBtn.addEventListener('click', async () => {
+        const result = testResult;
         const settings = {
             serverUrl: document.getElementById('serverUrl').value.trim(),
             username: document.getElementById('username').value.trim(),
@@ -258,21 +271,27 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         result.style.color = "#777";
         result.textContent = "Testing...";
-        chrome.runtime.sendMessage({ action: "test_connection", ...settings }, (response) => {
-            const ok = response && response.status === "success";
-            result.style.color = ok ? "#27ae60" : RED;
-            result.textContent = response ? response.message : "Error.";
+        testBtn.disabled = true;
+        chrome.runtime.sendMessage({ action: "test_connection", ...settings }, (reply) => {
+            const response = backgroundResponse(reply);
+            testBtn.disabled = false;
+            result.style.color = response.status === "success" ? "#27ae60" : RED;
+            result.textContent = response.message;
         });
     });
 
 
     // 8. Main Actions (Push & Pull)
+    let statusClearTimer = null;
+
     function handleSyncAction(actionName, btnId, activeColor, loadingText) {
         const btn = document.getElementById(btnId);
         if (!btn) return;
 
         btn.addEventListener('click', async () => {
             const status = document.getElementById('status');
+            // A pending clear from an earlier success must not wipe this action's message
+            clearTimeout(statusClearTimer);
             const serverUrl = document.getElementById('serverUrl').value.trim();
 
             const accessError = await requestServerAccess(serverUrl);
@@ -285,13 +304,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             status.style.color = activeColor;
             status.textContent = loadingText;
 
-            chrome.runtime.sendMessage({ action: actionName }, (response) => {
-                const ok = response && response.status === "success";
+            chrome.runtime.sendMessage({ action: actionName }, (reply) => {
+                const response = backgroundResponse(reply);
+                const ok = response.status === "success";
                 status.style.color = ok ? activeColor : RED;
-                status.textContent = response ? response.message : "Error.";
+                status.textContent = response.message;
                 // Errors stay until the next action: they say what to fix
-                if (ok || (response && response.status === "locked")) {
-                    setTimeout(() => { status.textContent = ''; }, 3500);
+                if (ok || response.status === "locked") {
+                    statusClearTimer = setTimeout(() => { status.textContent = ''; }, 3500);
                 }
             });
         });

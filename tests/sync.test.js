@@ -80,13 +80,21 @@ function loadBackground(server) {
         };
     };
     const badge = { text: '', color: null };
+    const storageListeners = [];
+    const access = { granted: true };
     const sandbox = {
         chrome: {
             runtime, bookmarks,
-            storage: { local: {
-                get: (k, cb) => setImmediate(() => cb({ ...store })),
-                set: (o, cb) => { Object.assign(store, o); setImmediate(() => cb && cb()); },
-            } },
+            storage: {
+                local: {
+                    get: (k, cb) => setImmediate(() => cb({ ...store })),
+                    set: (o, cb) => { Object.assign(store, o); setImmediate(() => cb && cb()); },
+                    remove: (k) => { delete store[k]; },
+                },
+                // Tests call storageChanged() to simulate a settings change from the popup
+                onChanged: { addListener(f) { storageListeners.push(f); } },
+            },
+            permissions: { contains: (p, cb) => setImmediate(() => cb(access.granted)) },
             alarms: { create() {}, clear() {}, onAlarm: { addListener() {} } },
             action: {
                 setBadgeText: ({ text }) => { badge.text = text; },
@@ -111,7 +119,8 @@ function loadBackground(server) {
     const call = (name) => new Promise((resolve) => sandbox[name](resolve));
     // Runs the onInstalled listener and waits for its async work
     const installed = async (details) => { runtime.installed(details); await flush(); };
-    return { sandbox, log, timers, bookmarks, seed, addLocal, titlesIn, flush, call, control, store, installed, badge };
+    const storageChanged = (changes) => storageListeners.forEach(f => f(changes, 'local'));
+    return { sandbox, log, timers, bookmarks, seed, addLocal, titlesIn, flush, call, control, store, installed, badge, access, storageChanged };
 }
 
 // No lock and no remote file yet
@@ -835,6 +844,76 @@ test('connection test: PROPFIND on the folder with the typed credentials', async
 });
 
 
+test("errors: Nextcloud's 423 on the bookmarks file is busy (retried), not a failure", async () => {
+    for (const method of ['GET', 'PUT']) {
+        const b = loadBackground((url, opts) => (url === JSON_URL && opts.method === method) ? { status: 423 } : noLock(url, opts));
+        await b.seed();
+        const res = await b.call('pushBookmarksToServer');
+        await b.flush();
+        assert.deepStrictEqual([res.status, res.message], ['locked', 'Another device is syncing.'], method);
+        assert.strictEqual(b.store.lastSync, undefined);
+        assert.strictEqual(b.badge.text, '');
+    }
+});
+
+test('errors: a missing host permission is reported as such, without contacting the server', async () => {
+    const b = loadBackground(noLock);
+    b.access.granted = false;
+    await b.seed();
+    const res = await b.call('pushBookmarksToServer');
+    assert.match(res.message, /^No access to your Nextcloud server yet/);
+    assert.deepStrictEqual(b.log, []);
+});
+
+test('errors: a non-network bug is not reported as "server unreachable"', () => {
+    const b = loadBackground(noLock);
+    const res = b.sandbox.failureResponse(new TypeError("Cannot read properties of undefined (reading 'parentId')"), 'Export failed.');
+    assert.strictEqual(res.message, 'Export failed.');
+});
+
+test("errors: Nextcloud's brute-force protection (429) gets its own message", async () => {
+    const b = loadBackground(lockGet({ status: 429 }));
+    await b.seed();
+    const res = await b.call('pushBookmarksToServer');
+    assert.strictEqual(res.message, 'Too many failed logins. Wait a moment, then check the app password.');
+});
+
+test('status: "not set up" and "no file yet" are shown but not flagged on the icon', async () => {
+    let b = loadBackground(noLock);
+    delete b.store.serverUrl;
+    await b.call('pushBookmarksToServer');
+    await b.flush();
+    assert.strictEqual(b.badge.text, '');
+    b = loadBackground(noLock);
+    await b.seed();
+    const res = await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual(res.status, 'error');
+    assert.strictEqual(b.store.lastSync, undefined);
+    assert.strictEqual(b.badge.text, '');
+});
+
+test('status: changing the server settings clears a recorded failure and the badge', async () => {
+    const b = loadBackground(lockGet({ status: 401 }));
+    await b.seed();
+    await b.call('pushBookmarksToServer');
+    await b.flush();
+    assert.strictEqual(b.badge.text, '!');
+    b.storageChanged({ autoSyncEnabled: { newValue: false } });
+    assert.strictEqual(b.badge.text, '!', 'unrelated setting cleared it');
+    b.storageChanged({ password: { newValue: 'fixed' } });
+    assert.strictEqual(b.store.lastSync, undefined);
+    assert.strictEqual(b.badge.text, '');
+});
+
+test('connection test: other files with a similar name are not the bookmarks file', async () => {
+    const body = FOLDER + '<d:response><d:href>/dav/old_bookmarks_sync.json</d:href></d:response>'
+        + '<d:response><d:href>/dav/bookmarks_sync.json.bak</d:href></d:response></d:multistatus>';
+    const r = await testConnection(propfind(207, body));
+    assert.strictEqual(r.message, 'Connected. No bookmarks file yet: Export creates it.');
+});
+
+
 // ------------------------------------------------------------------
 // Popup
 // ------------------------------------------------------------------
@@ -881,6 +960,7 @@ async function popup(serverUrl, { button = 'pushBtn', fields = {}, response = { 
         testResult: el('testResult').textContent,
         setupHidden: el('setupCard').hidden,
         lastSync: el('lastSync').textContent,
+        el,
     };
 }
 
@@ -937,4 +1017,11 @@ test('popup: test connection reports a bad URL without contacting the server', a
     const r = await popup('http://cloud.example/dav/', { button: 'testConnectionBtn' });
     assert.deepStrictEqual(r.sent, []);
     assert.strictEqual(r.testResult, 'Server URL must use https.');
+});
+
+test('popup: editing a field clears an earlier connection test result', async () => {
+    const r = await popup('https://cloud.example/dav/f/', { button: 'testConnectionBtn', fields: { username: 'u', password: 'p' }, response: { status: 'success', message: 'Connected. Bookmarks file found on the server.' } });
+    assert.strictEqual(r.testResult, 'Connected. Bookmarks file found on the server.');
+    r.el('password').listeners.input();
+    assert.strictEqual(r.el('testResult').textContent, '');
 });

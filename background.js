@@ -37,6 +37,8 @@ let pendingLockRemoval = null;
 
 const SETUP_HINT_URL = "https://<server>/remote.php/dav/files/<user>/<folder>/";
 const NETWORK_ERROR_MESSAGE = "Server unreachable. Check the URL and your connection.";
+const BUSY_MESSAGE = "Another device is syncing.";
+const NO_ACCESS_MESSAGE = "No access to your Nextcloud server yet: click Test connection or Export in the popup to allow it.";
 
 function describeHttpStatus(status) {
     if (status === 401) return "Wrong username or app password.";
@@ -45,23 +47,53 @@ function describeHttpStatus(status) {
     if (status === 404 || status === 409) return "Folder not found. Create it in Nextcloud Files first.";
     if (status === 405 || status === 501) return `Not a WebDAV folder URL. Use ${SETUP_HINT_URL}`;
     if (status === 507) return "Not enough storage space on the server.";
+    // Nextcloud's brute-force protection, after several wrong passwords
+    if (status === 429) return "Too many failed logins. Wait a moment, then check the app password.";
     if (status >= 500) return `Nextcloud server error (HTTP ${status}).`;
     return `Unexpected server response (HTTP ${status}).`;
 }
 
-// An error whose message can be shown as is
+// An error whose message can be shown as is. locked: transient, the sync is retried.
 class SyncError extends Error {
-    constructor(userMessage) {
+    constructor(userMessage, { locked = false } = {}) {
         super(userMessage);
         this.userMessage = userMessage;
+        this.locked = locked;
     }
 }
 
 function userMessageFor(error, fallback) {
-    if (error && error.userMessage) return error.userMessage;
-    // fetch() rejects with a TypeError on network, DNS or certificate failures
-    if (error && error.name === 'TypeError') return NETWORK_ERROR_MESSAGE;
-    return fallback;
+    return error && error.userMessage ? error.userMessage : fallback;
+}
+
+// The response for a failed sync: "locked" ones are retried, not reported
+function failureResponse(error, fallback) {
+    if (error && error.locked) return { status: "locked", message: error.userMessage };
+    return { status: "error", message: userMessageFor(error, fallback) };
+}
+
+// fetch() rejects on network, DNS or certificate failures, and in Chrome when the
+// host permission is missing; only these rejections mean "unreachable"
+async function davFetch(url, options) {
+    try {
+        return await fetch(url, options);
+    } catch (error) {
+        console.error("Request failed:", error);
+        throw new SyncError(NETWORK_ERROR_MESSAGE);
+    }
+}
+
+// The host permission is granted from the popup (it needs a click). Background
+// syncs can't ask for it, so they say so instead of failing as "unreachable".
+async function hasServerAccess(serverUrl) {
+    if (!chrome.permissions || !chrome.permissions.contains) return true;
+    let hostname;
+    try {
+        hostname = new URL(serverUrl).hostname;
+    } catch {
+        return true; // Reported by the request itself
+    }
+    return new Promise(resolve => chrome.permissions.contains({ origins: [`https://${hostname}/*`] }, resolve));
 }
 
 // ==========================================
@@ -161,10 +193,10 @@ async function acquireLock(baseUrl, authHeader, extensionId) {
     if (activeLocks.error) return { status: "error", message: activeLocks.error };
 
     const otherLocks = activeLocks.filter(lock => !lock.startsWith(extensionId));
-    if (otherLocks.length > 0) return { status: "locked", message: "Another device is syncing." };
+    if (otherLocks.length > 0) return { status: "locked", message: BUSY_MESSAGE };
 
     const created = await createLock(baseUrl, authHeader, extensionId);
-    if (created.busy) return { status: "locked", message: "Another device is syncing." };
+    if (created.busy) return { status: "locked", message: BUSY_MESSAGE };
     if (created.error) return { status: "error", message: created.error };
     const lockFile = created.lockFile;
 
@@ -385,7 +417,7 @@ function originalEtag(etag) {
 // Returns { exists, tree, etag }. tree is null when the file is missing, or when
 // it isn't a bookmark tree (e.g. a broken hand edit): an export then replaces it.
 async function fetchRemoteTree(fileUrl, authHeader) {
-    const response = await fetch(fileUrl, {
+    const response = await davFetch(fileUrl, {
         method: 'GET',
         credentials: 'omit',
         cache: 'no-store',
@@ -393,6 +425,8 @@ async function fetchRemoteTree(fileUrl, authHeader) {
     });
 
     if (response.status === 404) return { exists: false, tree: null, etag: null };
+    // Nextcloud's own file locking: another device is reading or writing it
+    if (response.status === 423) throw new SyncError(BUSY_MESSAGE, { locked: true });
     if (!response.ok) throw new SyncError(describeHttpStatus(response.status));
 
     const etag = originalEtag(response.headers ? response.headers.get('ETag') : null);
@@ -519,10 +553,14 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
     chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId'], async (result) => {
         if (!result.serverUrl || !result.username || !result.password || !result.extensionId) {
             isSyncing = false;
-            return sendResponse({ status: "error", message: "Not set up yet: open Settings (⚙️)." });
+            return sendResponse({ status: "error", message: "Not set up yet: open Settings (⚙️).", quiet: true });
         }
 
         const { serverUrl, username, password, extensionId } = result;
+        if (!(await hasServerAccess(serverUrl))) {
+            isSyncing = false;
+            return sendResponse({ status: "error", message: NO_ACCESS_MESSAGE });
+        }
         const credentials = username + ':' + password;
         const authHeader = 'Basic ' + toBase64Utf8(credentials);
         const baseUrl = serverUrl.endsWith('/') ? serverUrl : serverUrl + '/';
@@ -559,7 +597,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
                 await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped));
             }
 
-            const putFile = (conditionHeader) => fetch(fileUrl, {
+            const putFile = (conditionHeader) => davFetch(fileUrl, {
                 method: 'PUT',
                 credentials: 'omit',
                 body: JSON.stringify({ title: local.title, children: uploadChildren }, null, 2),
@@ -588,6 +626,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             if (response.status === 412) {
                 return sendResponse({ status: "locked", message: "Remote file changed, try again." });
             }
+            if (response.status === 423) throw new SyncError(BUSY_MESSAGE, { locked: true });
             if (!response.ok) throw new SyncError(describeHttpStatus(response.status));
 
             await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped));
@@ -598,7 +637,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
 
         } catch (error) {
             console.error("PUSH Error:", error);
-            sendResponse({ status: "error", message: userMessageFor(error, "Export failed.") });
+            sendResponse(failureResponse(error, "Export failed."));
         } finally {
             await removeLock(baseUrl, authHeader, myLockFile);
             isSyncing = false;
@@ -618,10 +657,14 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
     chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId'], async (result) => {
         if (!result.serverUrl || !result.username || !result.password || !result.extensionId) {
             isSyncing = false;
-            return sendResponse({ status: "error", message: "Not set up yet: open Settings (⚙️)." });
+            return sendResponse({ status: "error", message: "Not set up yet: open Settings (⚙️).", quiet: true });
         }
 
         const { serverUrl, username, password, extensionId } = result;
+        if (!(await hasServerAccess(serverUrl))) {
+            isSyncing = false;
+            return sendResponse({ status: "error", message: NO_ACCESS_MESSAGE });
+        }
         const credentials = username + ':' + password;
         const authHeader = 'Basic ' + toBase64Utf8(credentials);
         const baseUrl = serverUrl.endsWith('/') ? serverUrl : serverUrl + '/';
@@ -640,7 +683,8 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             if (!remote.tree) {
                 isSyncing = false;
                 const message = remote.exists ? "Invalid remote file. Export to replace it." : "No bookmarks file on the server yet: export from a device first.";
-                return sendResponse({ status: "error", message });
+                // Normal before the first export: told in the popup, not flagged on the icon
+                return sendResponse({ status: "error", message, quiet: !remote.exists });
             }
 
             const syncFolderId = await getOrCreateSyncFolder();
@@ -671,7 +715,7 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
         } catch (error) {
             console.error("PULL Error:", error);
             isSyncing = false;
-            sendResponse({ status: "error", message: userMessageFor(error, "Import failed.") });
+            sendResponse(failureResponse(error, "Import failed."));
         } finally {
             pendingLockRemoval = setTimeout(async () => {
                 pendingLockRemoval = null;
@@ -751,14 +795,35 @@ function scheduleAutomaticPush() {
 // Keeps the outcome of the last export or import, shown in the popup, and flags a
 // failure on the toolbar icon: automatic syncs would otherwise fail silently
 function recordSyncResult(kind, response) {
-    if (!response || response.status === "locked") return; // Transient: retried later
+    if (!response || response.status === "locked" || response.quiet) return; // Transient, or not a failure to flag
     const ok = response.status === "success";
     chrome.storage.local.set({ lastSync: { kind, ok, message: response.message, time: Date.now() } });
 
-    if (chrome.action) {
-        chrome.action.setBadgeText({ text: ok ? "" : "!" });
-        if (!ok) chrome.action.setBadgeBackgroundColor({ color: "#c0392b" });
-    }
+    setFailureBadge(!ok);
+}
+
+function setFailureBadge(failed) {
+    if (!chrome.action) return;
+    chrome.action.setBadgeText({ text: failed ? "!" : "" });
+    if (failed) chrome.action.setBadgeBackgroundColor({ color: "#c0392b" });
+}
+
+// A failure recorded with the old settings no longer says anything useful
+if (chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local') return;
+        if (changes.serverUrl || changes.username || changes.password) {
+            chrome.storage.local.remove('lastSync');
+            setFailureBadge(false);
+        }
+    });
+}
+
+// The badge isn't guaranteed to survive a browser restart: restore it from the record
+if (chrome.runtime.onStartup) {
+    chrome.runtime.onStartup.addListener(() => {
+        chrome.storage.local.get(['lastSync'], (result) => setFailureBadge(Boolean(result.lastSync && !result.lastSync.ok)));
+    });
 }
 
 function recordingResponse(kind, sendResponse) {
@@ -796,12 +861,19 @@ async function testConnection({ serverUrl, username, password }) {
         return { status: "error", message: describeHttpStatus(response.status) };
     }
 
-    const body = await response.text();
+    let body;
+    try {
+        body = await response.text();
+    } catch (error) {
+        console.error("Connection test failed:", error);
+        return { status: "error", message: NETWORK_ERROR_MESSAGE };
+    }
     if (!/<([a-z0-9]+:)?collection\s*\/>/i.test(body)) {
         return { status: "error", message: "This URL points to a file. Use the URL of a folder." };
     }
 
-    const hasFile = body.includes('bookmarks_sync.json');
+    // An <href> ending with the file name, not e.g. old_bookmarks_sync.json or a .bak
+    const hasFile = /\/bookmarks_sync\.json\s*<\//.test(body);
     return {
         status: "success",
         message: hasFile
@@ -817,7 +889,9 @@ async function testConnection({ serverUrl, username, password }) {
 // Listen to messages from popup.js
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "test_connection") {
-        testConnection(request).then(sendResponse);
+        testConnection(request)
+            .then(sendResponse)
+            .catch(() => sendResponse({ status: "error", message: NETWORK_ERROR_MESSAGE }));
         return true;
     } else if (request.action === "push_bookmarks") {
         pushBookmarksToServer(sendResponse);
