@@ -30,6 +30,7 @@ const PENDING_EXPORT_ALARM = "pendingExport";
 
 let isSyncing = false;
 let syncTimeout = null;
+let changedDuringSync = false; // A change in the sync folder while a sync ran
 
 // ==========================================
 // ERROR MESSAGES
@@ -175,7 +176,8 @@ async function removeLock(baseUrl, authHeader, lockFile) {
             const response = await fetch(lockUrl, {
                 method: 'DELETE',
                 credentials: 'omit',
-                headers: { 'Authorization': authHeader }
+                headers: { 'Authorization': authHeader },
+                signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined
             });
             if (response.status !== 423) return;
         } catch (error) {
@@ -223,21 +225,23 @@ async function getBookmarksTreeAsync(folderId) {
 // ==========================================
 
 // Get or Create the main Sync Folder (Cross-browser safe)
+// Returns { id, created }. created: the folder didn't exist (first use, or the user
+// deleted or renamed it). Its emptiness then says nothing about what to delete.
 async function getOrCreateSyncFolder() {
     return new Promise((resolve) => {
         chrome.bookmarks.search({ title: SYNC_FOLDER_NAME }, (results) => {
             const folder = results.find(r => !r.url);
-            if (folder) return resolve(folder.id);
+            if (folder) return resolve({ id: folder.id, created: false });
 
             // Create in Bookmarks Bar by default (Works on Chrome/Brave)
             chrome.bookmarks.create({ parentId: '1', title: SYNC_FOLDER_NAME }, (newFolder) => {
                 if (chrome.runtime.lastError || !newFolder) {
                     // FIREFOX FALLBACK: Let the browser place it safely if '1' is rejected
                     chrome.bookmarks.create({ title: SYNC_FOLDER_NAME }, (fallback) => {
-                        resolve(fallback ? fallback.id : null);
+                        resolve({ id: fallback ? fallback.id : null, created: true });
                     });
                 } else {
-                    resolve(newFolder.id);
+                    resolve({ id: newFolder.id, created: true });
                 }
             });
         });
@@ -437,9 +441,18 @@ async function fetchRemoteTree(fileUrl, authHeader) {
 }
 
 // Remembers when a file from an old-version device was last seen: such a device
-// overwrites without merging, so the popup asks to update it
+// overwrites without merging, so the popup asks to update it. Only after a file in
+// the new format was seen: before that, the old file may be this device's own,
+// written before it was updated (it is rewritten in the new format right away).
 function noteRemoteFormat(remote) {
-    if (remote.legacy) chrome.storage.local.set({ legacySeenAt: Date.now() });
+    if (!remote.tree) return;
+    if (!remote.legacy) {
+        chrome.storage.local.set({ newFormatSeen: true });
+        return;
+    }
+    chrome.storage.local.get(['newFormatSeen'], (result) => {
+        if (result.newFormatSeen) chrome.storage.local.set({ legacySeenAt: Date.now() });
+    });
 }
 
 // Makes the local sync folder match targetNodes: creates what is missing, updates
@@ -575,13 +588,16 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             if (!lock.lockFile) return sendResponse({ status: lock.status, message: lock.message });
             myLockFile = lock.lockFile;
 
-            const syncFolderId = await getOrCreateSyncFolder();
+            const syncFolder = await getOrCreateSyncFolder();
+            const syncFolderId = syncFolder.id;
             if (!syncFolderId) throw new SyncError("Could not create the bookmark folder.");
 
             const local = normalizeNode(await getBookmarksTreeAsync(syncFolderId));
             const remote = await fetchRemoteTree(fileUrl, authHeader);
             noteRemoteFormat(remote);
-            const savedBase = await loadSyncBase(fileUrl);
+            // A recreated folder is empty because it was deleted or renamed, not because
+            // the user deleted every bookmark: without a base, the merge restores them
+            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl);
 
             // Another device exported since our last sync: merge its changes instead
             // of overwriting them. Without a base (fresh install, new server) both
@@ -642,6 +658,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             if (!response.ok) throw new SyncError(describeHttpStatus(response.status));
 
             await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped));
+            chrome.storage.local.set({ newFormatSeen: true });
 
             console.log("🚀 Export successful!");
             const mergedNote = remoteChanged ? " (merged with remote changes)" : "";
@@ -652,7 +669,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             sendResponse(failureResponse(error, "Export failed."));
         } finally {
             await removeLock(baseUrl, authHeader, myLockFile);
-            isSyncing = false;
+            endSync();
         }
     });
 }
@@ -699,15 +716,17 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
                 return sendResponse({ status: "error", message, quiet: !remote.exists });
             }
 
-            const syncFolderId = await getOrCreateSyncFolder();
+            const syncFolder = await getOrCreateSyncFolder();
+            const syncFolderId = syncFolder.id;
             if (!syncFolderId) throw new SyncError("Could not create the bookmark folder.");
 
             // Local changes not exported yet are kept, not archived: only what was
             // deleted on the other side since our last sync goes to the archive
             const local = normalizeNode(await getBookmarksTreeAsync(syncFolderId));
-            // Without a base (first import, or a new server) the server wins, as before:
-            // a union would bring back what other devices deleted
-            const base = (await loadSyncBase(fileUrl)) || local.children;
+            // Without a base (first import, a new server, or a folder deleted or renamed
+            // and recreated empty) the server wins: the folder is restored from it
+            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl);
+            const base = savedBase || local.children;
             const target = mergeChildren(base, local.children, remote.tree.children);
 
             const { addedCount, renamedCount, skippedCount, skipped } = await applyTreeToLocal(syncFolderId, target);
@@ -721,7 +740,7 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             sendResponse({ status: "success", message: `${addedCount} ${itemWord} imported!${notesText}` });
 
             // Kept local changes still have to reach the server
-            exportNeeded = !sameTree(target, remote.tree.children);
+            exportNeeded = !sameTree(target, remote.tree.children) || remote.legacy;
 
         } catch (error) {
             console.error("PULL Error:", error);
@@ -731,8 +750,7 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             // otherwise have its fresh lock deleted. This also gives the bookmark
             // events caused by the import time to arrive while isSyncing is set.
             await removeLock(baseUrl, authHeader, myLockFile);
-            isSyncing = false;
-            if (exportNeeded) scheduleAutomaticPush();
+            endSync(exportNeeded);
         }
     });
 }
@@ -810,12 +828,30 @@ function scheduleAutomaticPush() {
     });
 }
 
-// The sync folder's id, without creating it (unlike getOrCreateSyncFolder)
-function findSyncFolderId() {
-    return new Promise(resolve => chrome.bookmarks.search({ title: SYNC_FOLDER_NAME }, (results) => {
-        const folder = (results || []).find(r => !r.url);
-        resolve(folder ? folder.id : null);
-    }));
+// The sync folder's id, without creating it (unlike getOrCreateSyncFolder).
+// Cached: bookmark events can come by thousands (HTML import, browser sync), and a
+// search walks every bookmark; the cache is checked with a cheap get().
+let cachedSyncFolderId = null;
+let syncFolderSearch = null; // In flight, shared by events arriving together
+
+async function findSyncFolderId() {
+    if (cachedSyncFolderId) {
+        const nodes = await new Promise(resolve => chrome.bookmarks.get(cachedSyncFolderId, (result) => {
+            void chrome.runtime.lastError; // Removed meanwhile
+            resolve(result);
+        }));
+        if (nodes && nodes[0] && !nodes[0].url && nodes[0].title === SYNC_FOLDER_NAME) return cachedSyncFolderId;
+        cachedSyncFolderId = null;
+    }
+    if (!syncFolderSearch) {
+        syncFolderSearch = new Promise(resolve => chrome.bookmarks.search({ title: SYNC_FOLDER_NAME }, (results) => {
+            const folder = (results || []).find(r => !r.url);
+            cachedSyncFolderId = folder ? folder.id : null;
+            syncFolderSearch = null;
+            resolve(cachedSyncFolderId);
+        }));
+    }
+    return syncFolderSearch;
 }
 
 async function isInsideSyncFolder(id) {
@@ -837,10 +873,24 @@ async function isInsideSyncFolder(id) {
 // schedule an export. ids are the nodes whose ancestry decides (the parent for a
 // created or removed bookmark, both parents for a move).
 function onBookmarkEvent(...ids) {
-    if (isSyncing) return; // Events caused by our own import or merge
     Promise.all(ids.filter(Boolean).map(isInsideSyncFolder)).then((inside) => {
-        if (inside.some(Boolean)) scheduleAutomaticPush();
+        if (!inside.some(Boolean)) return;
+        // During a sync, the change may be the sync's own or the user's: remembered,
+        // and exported once the sync ends (an export with nothing new uploads nothing)
+        if (isSyncing) {
+            changedDuringSync = true;
+        } else {
+            scheduleAutomaticPush();
+        }
     });
+}
+
+// Ends a sync: clears the flag, then exports changes made while it ran
+function endSync(exportNeeded = false) {
+    isSyncing = false;
+    const changed = changedDuringSync;
+    changedDuringSync = false;
+    if (exportNeeded || changed) scheduleAutomaticPush();
 }
 
 // ==========================================
@@ -926,9 +976,20 @@ async function testConnection({ serverUrl, username, password }) {
         console.error("Connection test failed:", error);
         return { status: "error", message: NETWORK_ERROR_MESSAGE };
     }
-    // One block per resource: the folder itself first, then its children
+    // One block per resource: the folder itself (listed first by Nextcloud, but
+    // WebDAV doesn't require it, so it is found by its href), then its children
     const blocks = body.split(/<\/(?:[a-z0-9]+:)?response>/i);
-    const folderBlock = blocks[0];
+    const hrefPath = (block) => {
+        const match = block.match(/<(?:[a-z0-9]+:)?href>([^<]*)</i);
+        if (!match) return null;
+        try {
+            return decodeURIComponent(new URL(match[1], baseUrl).pathname).replace(/\/$/, '');
+        } catch {
+            return null;
+        }
+    };
+    const folderPath = decodeURIComponent(new URL(baseUrl).pathname).replace(/\/$/, '');
+    const folderBlock = blocks.find(block => hrefPath(block) === folderPath) || blocks[0];
     if (!/<([a-z0-9]+:)?collection\s*\/>/i.test(folderBlock)) {
         return { status: "error", message: "This URL points to a file. Use the URL of a folder." };
     }
@@ -938,14 +999,19 @@ async function testConnection({ serverUrl, username, password }) {
     const hasFile = Boolean(fileBlock);
 
     // Nextcloud permission letters: C = create files in a folder, W = write a file.
-    // Absent on other WebDAV servers: then nothing is checked.
+    // Every sync creates the lock file (C on the folder), and the bookmarks file is
+    // created (C) or rewritten (W on it). Absent on other WebDAV servers: not checked.
     const permissionsOf = (block) => {
         const match = block && block.match(/<(?:[a-z0-9]+:)?permissions>([^<]*)</i);
         return match ? match[1] : null;
     };
-    const writable = hasFile ? permissionsOf(fileBlock) : permissionsOf(folderBlock);
-    if (writable !== null && !writable.includes(hasFile ? 'W' : 'C')) {
-        return { status: "error", message: "Connected, but this folder is read-only for you: the extension can't save the bookmarks file there." };
+    const folderRights = permissionsOf(folderBlock);
+    if (folderRights !== null && !folderRights.includes('C')) {
+        return { status: "error", message: "Connected, but you can't create files in this folder (read-only share?): the extension needs to." };
+    }
+    const fileRights = permissionsOf(fileBlock);
+    if (hasFile && fileRights !== null && !fileRights.includes('W')) {
+        return { status: "error", message: "Connected, but the bookmarks file in this folder is read-only for you." };
     }
 
     return {
@@ -1042,7 +1108,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
             }
         });
     } else if (alarm.name === PENDING_EXPORT_ALARM) {
-        // Backup for an automatic export lost when the service worker was stopped
+        // Backup for an automatic export lost when the service worker was stopped.
+        // A pending timer or a running sync means the worker is alive: they handle it.
+        if (syncTimeout || isSyncing) return;
         runAutomaticPush();
     } else if (alarm.name === "dailyCleanup") {
         cleanOldArchives();

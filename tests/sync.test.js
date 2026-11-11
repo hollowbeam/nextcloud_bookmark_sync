@@ -979,14 +979,25 @@ test('auto-push: only changes inside the sync folder schedule an export', async 
     assert.strictEqual(exports(), 2);
 });
 
-test('auto-push: events during a sync are ignored before the folder lookup', async () => {
+test('auto-push: a change made during a sync is exported once the sync ends', async () => {
     const b = loadBackground(noLock);
     const syncId = await b.seed();
     vm.runInContext('isSyncing = true', b.sandbox);
     b.bookmarks.events.created('x', { parentId: syncId });
-    vm.runInContext('isSyncing = false', b.sandbox);
     await b.flush();
-    assert.strictEqual(b.timers.filter(t => t.ms === 5000).length, 0);
+    assert.strictEqual(b.timers.filter(t => t.ms === 5000).length, 0, 'export during the sync');
+    b.sandbox.endSync();
+    await b.flush();
+    assert.strictEqual(b.timers.filter(t => t.ms === 5000).length, 1, 'change dropped');
+});
+
+test('auto-push: a sync without changes ends without scheduling an export', async () => {
+    const b = loadBackground(noLock);
+    await b.seed();
+    vm.runInContext('isSyncing = true', b.sandbox);
+    b.sandbox.endSync();
+    await b.flush();
+    assert.strictEqual(b.timers.length, 0);
 });
 
 test('auto-push: a backup alarm is set with the timer, cleared once the export ran', async () => {
@@ -1020,16 +1031,18 @@ test('auto-push: turning auto-sync off clears the backup alarm', async () => {
     await b.flush();
     assert.ok(b.alarms.pendingExport);
     b.store.autoSyncEnabled = false;
+    vm.runInContext('syncTimeout = null', b.sandbox); // the timer was lost with the worker
     b.alarms.fire('pendingExport');
     await b.flush();
     assert.strictEqual(b.alarms.pendingExport, undefined);
     assert.deepStrictEqual(b.log, []);
 });
 
-test('old version: a raw file from 1.5.1 or older is noted, a 1.6.0+ file is not', async () => {
+test('old version: a raw file replacing a new-format one is noted, a 1.6.0+ file is not', async () => {
     const raw = { id: '42', title: '🔄 Bookmark Sync', dateAdded: 1, children: [{ id: '43', title: 'A', url: bm('A').url, dateAdded: 1 }] };
     let b = loadBackground((url, opts) => (url === JSON_URL && opts.method === 'GET') ? { status: 200, body: raw } : noLock(url, opts));
     await b.seed();
+    b.store.newFormatSeen = true;
     await b.call('pullBookmarksFromServer');
     await b.flush();
     assert.ok(Date.now() - b.store.legacySeenAt < 1000);
@@ -1039,6 +1052,19 @@ test('old version: a raw file from 1.5.1 or older is noted, a 1.6.0+ file is not
     await b.call('pullBookmarksFromServer');
     await b.flush();
     assert.strictEqual(b.store.legacySeenAt, undefined);
+    assert.strictEqual(b.store.newFormatSeen, true);
+});
+
+test("old version: this device's own pre-update file is not reported, and is rewritten", async () => {
+    const raw = { id: '42', title: 'root', dateAdded: 1, children: [{ id: '43', title: 'A', url: bm('A').url }] };
+    const b = loadBackground((url, opts) => (url === JSON_URL && opts.method === 'GET') ? { status: 200, body: raw } : noLock(url, opts));
+    const id = await b.seed();
+    await b.addLocal(id, 'A', bm('A').url);
+    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A')] };
+    await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual(b.store.legacySeenAt, undefined);
+    assert.ok(b.timers.some(t => t.ms === 5000), 'old-format file not scheduled for rewrite');
 });
 
 test('old version: a raw file is rewritten in the new format even when nothing changed', async () => {
@@ -1056,11 +1082,14 @@ const permissions = (folder, file) => FOLDER.replace('</d:prop>', `<oc:permissio
     + '</d:multistatus>';
 
 test('connection test: a read-only folder or file is reported', async () => {
-    const readOnly = "Connected, but this folder is read-only for you: the extension can't save the bookmarks file there.";
-    assert.strictEqual((await testConnection(propfind(207, permissions('SG')))).message, readOnly);
-    assert.strictEqual((await testConnection(propfind(207, permissions('RGDNVCK', 'SG')))).message, readOnly);
+    const noCreate = "Connected, but you can't create files in this folder (read-only share?): the extension needs to.";
+    const fileReadOnly = 'Connected, but the bookmarks file in this folder is read-only for you.';
+    assert.strictEqual((await testConnection(propfind(207, permissions('SG')))).message, noCreate);
+    // The file is writable but the lock file can't be created next to it
+    assert.strictEqual((await testConnection(propfind(207, permissions('SG', 'RGDNVW')))).message, noCreate);
+    assert.strictEqual((await testConnection(propfind(207, permissions('RGDNVCK', 'SG')))).message, fileReadOnly);
     assert.strictEqual((await testConnection(propfind(207, permissions('RGDNVCK')))).status, 'success');
-    assert.strictEqual((await testConnection(propfind(207, permissions('SG', 'RGDNVW')))).status, 'success');
+    assert.strictEqual((await testConnection(propfind(207, permissions('RGDNVCK', 'RGDNVW')))).status, 'success');
     // No oc:permissions (another WebDAV server): nothing to check
     assert.strictEqual((await testConnection(propfind(207, FOLDER + '</d:multistatus>'))).status, 'success');
 });
@@ -1197,4 +1226,44 @@ test('popup: the old-version warning shows for a week after such a file was seen
     assert.strictEqual((await popup('')).legacyHidden, true);
     assert.strictEqual((await popup('', { stored: { legacySeenAt: Date.now() - 60000 } })).legacyHidden, false);
     assert.strictEqual((await popup('', { stored: { legacySeenAt: Date.now() - 8 * 86400000 } })).legacyHidden, true);
+});
+
+// ------------------------------------------------------------------
+// Sync folder deleted or renamed
+// ------------------------------------------------------------------
+
+test('folder: a deleted or renamed sync folder is restored from the server, not wiped from it', async () => {
+    for (const action of ['pullBookmarksFromServer', 'pushBookmarksToServer']) {
+        const state = { remote: { title: 'root', children: [bm('A'), bm('B')] } };
+        const b = loadBackground(davServer(state));
+        // Synced before, then the user deleted (or renamed) the folder: no seed()
+        b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A'), bm('B')] };
+        const res = await b.call(action);
+        await b.flush();
+        assert.strictEqual(res.status, 'success', `${action}: ${res.message}`);
+        assert.deepStrictEqual(titles(state.remote.children), ['A', 'B'], `${action} wiped the server`);
+        const folder = [...b.bookmarks.nodes.values()].find(n => n.title === '🔄 Bookmark Sync');
+        assert.deepStrictEqual(b.titlesIn(folder.id), ['A', 'B'], `${action} did not restore the folder`);
+        assert.ok(!b.timers.some(t => t.ms === 5000) || action === 'pushBookmarksToServer', 'export scheduled to empty the server');
+    }
+});
+
+test('connection test: the folder is found by its href, whatever the order of the responses', async () => {
+    const body = '<d:multistatus>'
+        + '<d:response><d:href>/dav/bookmarks_sync.json</d:href><d:propstat><d:prop><d:resourcetype/></d:prop></d:propstat></d:response>'
+        + '<d:response><d:href>/dav/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>'
+        + '</d:multistatus>';
+    const r = await testConnection(propfind(207, body));
+    assert.deepStrictEqual([r.status, r.message], ['success', 'Connected. Bookmarks file found on the server.']);
+});
+
+test('auto-push: the sync folder id is cached between bookmark events', async () => {
+    const b = loadBackground(noLock);
+    const syncId = await b.seed();
+    let searches = 0;
+    const search = b.bookmarks.search;
+    b.bookmarks.search = (q, cb) => { searches++; search(q, cb); };
+    for (let i = 0; i < 5; i++) b.bookmarks.events.created('x' + i, { parentId: syncId });
+    await b.flush();
+    assert.ok(searches <= 2, `${searches} full searches for 5 events`);
 });
