@@ -233,17 +233,22 @@ async function getOrCreateSyncFolder() {
             const folder = results.find(r => !r.url);
             if (folder) return resolve({ id: folder.id, created: false });
 
-            // Create in Bookmarks Bar by default (Works on Chrome/Brave)
-            chrome.bookmarks.create({ parentId: '1', title: SYNC_FOLDER_NAME }, (newFolder) => {
-                if (chrome.runtime.lastError || !newFolder) {
-                    // FIREFOX FALLBACK: Let the browser place it safely if '1' is rejected
-                    chrome.bookmarks.create({ title: SYNC_FOLDER_NAME }, (fallback) => {
-                        resolve({ id: fallback ? fallback.id : null, created: true });
-                    });
-                } else {
+            // In the bookmarks bar: its id is '1' in Chrome, Brave and Edge, and
+            // 'toolbar_____' in Firefox. Without a parent, the browser picks one
+            // (Firefox: Other Bookmarks), as a last resort.
+            const parents = ['1', 'toolbar_____', undefined];
+            const tryCreate = (index) => {
+                const parentId = parents[index];
+                const details = parentId ? { parentId, title: SYNC_FOLDER_NAME } : { title: SYNC_FOLDER_NAME };
+                chrome.bookmarks.create(details, (newFolder) => {
+                    if (chrome.runtime.lastError || !newFolder) {
+                        if (index + 1 < parents.length) return tryCreate(index + 1);
+                        return resolve({ id: null, created: true });
+                    }
                     resolve({ id: newFolder.id, created: true });
-                }
-            });
+                });
+            };
+            tryCreate(0);
         });
     });
 }

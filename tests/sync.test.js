@@ -38,6 +38,7 @@ function makeBookmarks(runtime) {
         // Simulates the browser refusing an entry: an invalid URL, or a folder named BADFOLDER
         create: (d, cb) => setImmediate(() => {
             if ((d.url && d.url.startsWith('chrome://')) || d.title === 'BADFOLDER') return fail(cb, 'refused');
+            if (d.parentId && !nodes.has(d.parentId)) return fail(cb, 'Invalid parent');
             const parentId = d.parentId || '1';
             const n = add({ id: String(nextId++), parentId, title: d.title, url: d.url, children: d.url ? undefined : [] });
             nodes.get(parentId).children.push(n.id);
@@ -1266,4 +1267,21 @@ test('auto-push: the sync folder id is cached between bookmark events', async ()
     for (let i = 0; i < 5; i++) b.bookmarks.events.created('x' + i, { parentId: syncId });
     await b.flush();
     assert.ok(searches <= 2, `${searches} full searches for 5 events`);
+});
+
+test('folder: created in the bookmarks bar in Chrome and in Firefox', async () => {
+    // Chrome-like tree: the bar is '1'
+    let b = loadBackground(noLock);
+    let folder = await b.sandbox.getOrCreateSyncFolder();
+    assert.strictEqual(b.bookmarks.nodes.get(folder.id).parentId, '1');
+    // Firefox-like tree: no '1', the toolbar is 'toolbar_____'
+    b = loadBackground(noLock);
+    const nodes = b.bookmarks.nodes;
+    nodes.delete('1');
+    nodes.get('0').children = ['toolbar_____', 'unfiled_____'];
+    nodes.set('toolbar_____', { id: 'toolbar_____', parentId: '0', title: 'toolbar', children: [] });
+    nodes.set('unfiled_____', { id: 'unfiled_____', parentId: '0', title: 'unfiled', children: [] });
+    folder = await b.sandbox.getOrCreateSyncFolder();
+    assert.strictEqual(nodes.get(folder.id).parentId, 'toolbar_____');
+    assert.strictEqual(folder.created, true);
 });

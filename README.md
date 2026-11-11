@@ -14,7 +14,7 @@ Say goodbye to Big Tech's cloud services. Keep your bookmarks perfectly synced a
 * **🛡️ Collision Protection:** Uses a lock file (`bookmarks_sync.lock`) via WebDAV so that a device backs off with a "locked" status if another device is already syncing, and automatic exports are retried afterwards. It's a best-effort lock (not an atomic distributed mutex) with a 5-minute staleness timeout, so a crashed device can never leave sync permanently blocked.
 * **🔀 Concurrent Changes Merged:** Each device remembers the folder as of its last sync. If another device exported in the meantime, changes from both sides are merged (additions kept, deletions and renames applied) instead of the last export replacing the other's. The upload is conditional (`If-Match` on the file's ETag), so a write that slips in between is detected and retried rather than overwritten.
 * **🩺 Clear Diagnostics:** A **Test connection** button and precise error messages (wrong password, folder not found, not a WebDAV URL, server unreachable). The last sync result is shown in the popup, and a failed automatic sync is flagged on the toolbar icon.
-* **⚡ Native Integration:** Creates a dedicated "🔄 Bookmark Sync" folder right in your Bookmarks Bar for easy, isolated access.
+* **⚡ Native Integration:** Creates a dedicated "🔄 Bookmark Sync" folder right in your bookmarks bar (Chrome, Brave, Edge and Firefox) for easy, isolated access. You can move it anywhere afterwards: it is found by its name.
 
 ## 📋 Prerequisites
 
