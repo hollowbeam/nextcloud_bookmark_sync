@@ -15,11 +15,13 @@ Browser extension (Chrome, Brave, Edge, Firefox; Manifest V3) that syncs the boo
 - End-to-end: `bash tests/e2e/server.sh start` (Nextcloud in Docker behind an HTTPS gzip proxy), then `node tests/e2e/sync.e2e.js`. On Windows, use the installed Edge: `E2E_BROWSER=msedge`. Stop with `bash tests/e2e/server.sh stop`.
 - User-facing text lives in `_locales/en` and `_locales/fr` (same keys in both; `t()` in the code). The tests read the English messages.
 
+## Sensitive areas
+Merge, base (it records which folder it describes), lock, conditional upload, folder handling (sync folder, duplicates, archive folder), `applyTreeToLocal`. Even a small change there starts with the `architect` agent, before any code: the 1.7.1 polish, thought of as five small points, produced two review findings on its own code (an archive cleanup contradicting another change, a race with a sync).
+
 ## Before merging a change to the sync logic
-(merge, base, lock, conditional upload, folder handling, `applyTreeToLocal`)
 1. Unit and end-to-end tests pass, locally and in CI.
-2. The `reviewer` agent on the full diff since the last release (not only the last commit). Check each finding in the code; test those marked « à confirmer » before fixing them.
-3. A second review by another vendor's model (Gemini via `agy`, see the `/second-review` skill), its findings checked the same way.
+2. The `reviewer` agent on the full diff since the last release (not only the last commit): a bug can sit in an earlier unreleased PR (the 1.7.1 review found one from #11). Check each finding in the code; test those marked « à confirmer » before fixing them. Browser behaviour (`bookmarks`, `alarms`, `permissions`, Chrome against Firefox) can't be checked by the agents: check it in the official documentation, with the source.
+3. A second review by another vendor's model (Gemini via `agy`, see the `/second-review` skill), its findings checked the same way. Keep its report in `C:\Users\shini\Developments\second-reviews\`, not only in `%TEMP%`.
 4. Manual check in Firefox, since CI only runs Chromium.
 
 ## Release
