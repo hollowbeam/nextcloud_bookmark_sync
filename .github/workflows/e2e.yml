@@ -1,0 +1,35 @@
+name: End-to-end
+
+# The real extension in Chromium, against a real Nextcloud behind an HTTPS gzip proxy,
+# and the store package loaded as built
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Start Nextcloud
+        run: bash tests/e2e/server.sh start
+      - name: Sync scenarios
+        run: node tests/e2e/sync.e2e.js
+      - name: Store package
+        run: |
+          node tools/package.js
+          node tests/e2e/package.e2e.js
+      - name: Nextcloud logs on failure
+        if: failure()
+        run: docker logs --tail 50 nbs-nc

@@ -84,7 +84,21 @@ Other settings:
 Contributions, issues, and feature requests are highly encouraged!
 If you find a bug or have an idea for an improvement, feel free to open an issue or submit a pull request. Let's build a better, decentralized sync tool together.
 
-Before submitting a pull request, run the tests (Node.js 22 or later, no dependencies): `node --test`. They load `background.js` and `popup.js` with mocked browser and WebDAV APIs, and run automatically on every pull request.
+Before submitting a pull request, run the unit tests (Node.js 22 or later, no dependencies): `node --test`. They load `background.js` and `popup.js` with mocked browser and WebDAV APIs.
+
+The end-to-end tests run the real extension in Chromium against a real Nextcloud (Docker) behind an HTTPS proxy that compresses responses, like many real setups:
+
+```
+npm ci
+npx playwright install chromium     # or use an installed Edge: E2E_BROWSER=msedge
+bash tests/e2e/server.sh start      # Nextcloud on https://localhost:8443 (about a minute)
+node tests/e2e/sync.e2e.js          # connection test, errors, one device, two devices merging
+node tools/package.js               # dist/nextcloud_bookmark_sync-<version>.zip, the store package
+node tests/e2e/package.e2e.js       # loads that zip, in English and French
+bash tests/e2e/server.sh stop
+```
+
+Both suites run automatically on every pull request. `node tools/store-screenshots.js en` (or `fr`) renders the store screenshots into `dist/screenshots/`.
 
 ## 📄 License
 

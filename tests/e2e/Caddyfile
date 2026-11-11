@@ -1,0 +1,7 @@
+# HTTPS in front of Nextcloud for the end-to-end tests. The extension only talks to
+# https:// servers; "encode gzip" reproduces the ETag rewriting of real proxies.
+https://localhost:8443 {
+	tls internal
+	encode gzip
+	reverse_proxy nc:80
+}
