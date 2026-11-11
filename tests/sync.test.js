@@ -69,7 +69,22 @@ function makeBookmarks(runtime) {
             cb(view(n));
         }),
         update: (id, changes, cb) => setImmediate(() => { Object.assign(nodes.get(id), changes); cb(view(nodes.get(id))); }),
-        removeTree: () => {},
+        removeTree: (id, cb) => setImmediate(() => {
+            const drop = (nodeId) => { const n = nodes.get(nodeId); (n.children || []).forEach(drop); nodes.delete(nodeId); };
+            const kids = nodes.get(nodes.get(id).parentId).children;
+            kids.splice(kids.indexOf(id), 1);
+            drop(id);
+            if (cb) cb();
+        }),
+        // Like the browsers: a folder that isn't empty is refused
+        remove: (id, cb) => setImmediate(() => {
+            const n = nodes.get(id);
+            if (n.children && n.children.length > 0) return fail(cb || (() => {}), "Can't remove non-empty folder.");
+            const kids = nodes.get(n.parentId).children;
+            kids.splice(kids.indexOf(id), 1);
+            nodes.delete(id);
+            if (cb) cb();
+        }),
         // The extension's listeners, so tests can fire browser events
         events: {},
         onCreated: { addListener(f) { api.events.created = f; } },
@@ -81,7 +96,7 @@ function makeBookmarks(runtime) {
 }
 
 function loadBackground(server, { locale = i18n } = {}) {
-    const runtime = { lastError: undefined, onMessage: { addListener(f) { runtime.message = f; } }, onInstalled: { addListener(f) { runtime.installed = f; } } };
+    const runtime = { lastError: undefined, onMessage: { addListener(f) { runtime.message = f; } }, onInstalled: { addListener(f) { runtime.installed = f; } }, onStartup: { addListener(f) { runtime.startup = f; } } };
     const bookmarks = makeBookmarks(runtime);
     const timers = [];
     const log = [];
@@ -1174,7 +1189,7 @@ test('archive: an archive folder moved into the sync folder is never synced or a
 
 // Loads popup.js against a fake DOM, fills the fields, clicks a button.
 // response is what the background script answers.
-async function popup(serverUrl, { button = 'syncBtn', fields = {}, response = { status: 'success', message: 'ok' }, stored = {}, tree = null, click = true } = {}) {
+async function popup(serverUrl, { button = 'syncBtn', fields = {}, response = { status: 'success', message: 'ok' }, stored = {}, tree = null, bookmarks = null, click = true } = {}) {
     const writes = [];
     const removed = [];
     const order = [];
@@ -1210,8 +1225,8 @@ async function popup(serverUrl, { button = 'syncBtn', fields = {}, response = { 
                 },
                 onChanged: { addListener() {} },
             },
-            bookmarks: tree ? { getTree: (cb) => cb(tree) } : undefined,
-            permissions: { request: (p, cb) => { requests.push(p.origins[0]); cb(true); } },
+            bookmarks: bookmarks || (tree ? { getTree: (cb) => cb(tree) } : undefined),
+            permissions: { request: (p, cb) => { requests.push(p.origins[0]); order.push('request'); cb(true); } },
             runtime: {
                 sendMessage: (m, cb) => { sent.push(m.action); messages.push(m); order.push('send ' + m.action); if (cb) cb(response); },
                 getManifest: () => ({ version: '9.8.7' }),
@@ -1540,4 +1555,130 @@ test('popup: warns about extra sync folders', async () => {
     const two = await popup('', { click: false, stored: { duplicateSyncFolders: 1 } });
     assert.strictEqual(two.duplicateHidden, false);
     assert.match(two.duplicateText, /^⚠️ 1 more "🔄 Bookmark Sync" folder\(s\) found/);
+});
+
+test('folder: with several sync folders, the synced one is recorded for the popup', async () => {
+    const b = loadBackground(noLock);
+    const older = await b.addLocal('1', '🔄 Bookmark Sync');
+    const newer = await b.addLocal('1', '🔄 Bookmark Sync');
+    b.bookmarks.nodes.get(older.id).dateAdded = 1000;
+    b.bookmarks.nodes.get(newer.id).dateAdded = 2000;
+    await b.sandbox.getOrCreateSyncFolder();
+    await b.flush();
+    assert.strictEqual(b.store.syncedFolderId, older.id);
+    const kids = b.bookmarks.nodes.get('1').children;
+    kids.splice(kids.indexOf(newer.id), 1);
+    b.bookmarks.nodes.delete(newer.id);
+    await b.sandbox.getOrCreateSyncFolder();
+    await b.flush();
+    assert.strictEqual(b.store.syncedFolderId, null);
+});
+
+test('popup: the duplicate warning says where the synced folder is and how many bookmarks it holds', async () => {
+    const nodes = {
+        s: { id: 's', parentId: '1', title: '🔄 Bookmark Sync' },
+        1: { id: '1', parentId: '0', title: 'Bookmarks bar' },
+    };
+    const bookmarks = {
+        get: (id, cb) => cb(nodes[id] ? [nodes[id]] : undefined),
+        getSubTree: (id, cb) => cb([{ id: 's', title: '🔄 Bookmark Sync', children: [
+            { title: 'A', url: 'https://a.example/' },
+            { title: 'Dir', children: [{ title: 'B', url: 'https://b.example/' }] },
+            { title: '🗑️ Bookmark Archives', children: [{ title: 'Old', url: 'https://old.example/' }] },
+        ] }]),
+    };
+    const r = await popup('', { click: false, stored: { duplicateSyncFolders: 1, syncedFolderId: 's' }, bookmarks });
+    assert.strictEqual(r.duplicateText, '⚠️ 1 more "🔄 Bookmark Sync" folder(s) found (often after the browser\'s own sync). '
+        + 'Only one is synced: the one in "Bookmarks bar", holding 2 bookmark(s). Move what you need into it, then delete the others.');
+});
+
+// ------------------------------------------------------------------
+// Browser startup, first setup, archive folder
+// ------------------------------------------------------------------
+
+test('startup: the alarms are created again, and the import runs a minute after startup', async () => {
+    const b = loadBackground(noLock);
+    b.store.syncFrequency = '30';
+    b.sandbox.chrome.runtime.startup();
+    await b.flush();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(b.alarms.autoPullAlarm)), { delayInMinutes: 1, periodInMinutes: 30 });
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(b.alarms.dailyCleanup)), { delayInMinutes: 1, periodInMinutes: 1440 });
+});
+
+test('startup: no automatic import while automatic sync is paused', async () => {
+    const b = loadBackground(noLock);
+    b.store.autoSyncEnabled = false;
+    b.sandbox.chrome.runtime.startup();
+    await b.flush();
+    assert.strictEqual(b.alarms.autoPullAlarm, undefined);
+    assert.ok(b.alarms.dailyCleanup);
+});
+
+test('status: no access before any sync is not flagged on the icon, but it is afterwards', async () => {
+    const b = loadBackground(noLock);
+    b.access.granted = false;
+    await b.seed();
+    for (const name of ['pushBookmarksToServer', 'pullBookmarksFromServer']) {
+        const res = await b.call(name);
+        await b.flush();
+        assert.match(res.message, /^No access to your Nextcloud server yet/);
+        assert.strictEqual(b.badge.text, '', name);
+        assert.strictEqual(b.store.lastSync, undefined, name);
+    }
+    // Access revoked after syncs that worked: worth flagging
+    b.store.lastSync = { kind: 'sync', ok: true, message: 'Up to date.', time: 1 };
+    await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual(b.badge.text, '!');
+});
+
+test('popup: typed settings start saving before the permission prompt', async () => {
+    const r = await popup('https://cloud.example/dav/', { click: false });
+    r.el('password').value = 'new-password';
+    r.el('password').listeners.input(); // debounced save pending
+    await r.el('syncBtn').listeners.click();
+    const saved = r.order.indexOf('set password');
+    assert.ok(saved >= 0 && saved < r.order.indexOf('request'), `order: ${r.order}`);
+});
+
+test('archive: an existing archive folder stays where the user moved it', async () => {
+    const state = { remote: { title: 'root', children: [] } };
+    const b = loadBackground(davServer(state));
+    const syncId = await b.seed();
+    const other = await b.addLocal('0', 'Other bookmarks');
+    const archive = await b.addLocal(other.id, '🗑️ Bookmark Archives');
+    await b.addLocal(syncId, 'A', bm('A').url);
+    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A')] };
+    const res = await b.call('pullBookmarksFromServer'); // A was deleted on another device
+    await b.flush();
+    assert.strictEqual(res.message, '1 archived.');
+    assert.strictEqual(b.bookmarks.nodes.get(archive.id).parentId, other.id);
+});
+
+const daysAgo = (days) => new Date(Date.now() - days * 86400000).toISOString().split('T')[0];
+
+test('cleanup: archives are kept for whole days, and other folders are left alone', async () => {
+    const b = loadBackground(noLock);
+    b.store.retentionDays = 1;
+    const archive = await b.addLocal('1', '🗑️ Bookmark Archives');
+    const yesterday = await b.addLocal(archive.id, daysAgo(1));
+    await b.addLocal(yesterday.id, 'Y', 'https://y.example/');
+    const old = await b.addLocal(archive.id, daysAgo(2));
+    await b.addLocal(old.id, 'O', 'https://o.example/');
+    await b.addLocal(archive.id, 'Notes');
+    await b.sandbox.cleanOldArchives();
+    await b.flush();
+    assert.deepStrictEqual(b.titlesIn(archive.id), [daysAgo(1), 'Notes']);
+});
+
+test('cleanup: the archive folder is removed once its last date folder expires', async () => {
+    const b = loadBackground(noLock);
+    b.store.retentionDays = 30;
+    const archive = await b.addLocal('1', '🗑️ Bookmark Archives');
+    const old = await b.addLocal(archive.id, daysAgo(31));
+    await b.addLocal(old.id, 'O', 'https://o.example/');
+    await b.sandbox.cleanOldArchives();
+    await b.flush();
+    assert.strictEqual(b.bookmarks.nodes.has(archive.id), false);
+    assert.deepStrictEqual(b.titlesIn('1'), []);
 });

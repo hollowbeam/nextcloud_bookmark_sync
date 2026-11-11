@@ -244,5 +244,8 @@
   },
   "duplicateFolders": {
     "message": "⚠️ $1 dossier(s) « 🔄 Bookmark Sync » en trop (souvent après la synchronisation du navigateur lui-même). Seul le plus ancien est synchronisé : déplacez-y ce dont vous avez besoin, puis supprimez les autres."
+  },
+  "duplicateFoldersWhere": {
+    "message": "⚠️ $1 dossier(s) « 🔄 Bookmark Sync » en trop (souvent après la synchronisation du navigateur lui-même). Un seul est synchronisé : celui qui se trouve dans « $2 » et contient $3 favori(s). Déplacez-y ce dont vous avez besoin, puis supprimez les autres."
   }
 }

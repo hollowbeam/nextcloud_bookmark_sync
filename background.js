@@ -119,6 +119,13 @@ async function hasServerAccess(serverUrl) {
     return new Promise(resolve => chrome.permissions.contains({ origins: [`https://${hostname}/*`] }, resolve));
 }
 
+// Before any sync with the current settings (none recorded: first setup, or settings
+// just changed), no access is normal: the user hasn't clicked Test connection or Sync
+// now yet. Not flagged on the icon then; afterwards (e.g. access revoked), it is.
+function noAccessResponse(lastSync) {
+    return { status: "error", message: NO_ACCESS_MESSAGE, quiet: !lastSync };
+}
+
 // ==========================================
 // WEBDAV / NEXTCLOUD HELPER FUNCTIONS
 // ==========================================
@@ -247,14 +254,18 @@ async function getBookmarksTreeAsync(folderId) {
 
 // Several folders can carry the name, e.g. when the browser's own sync (Chrome Sync,
 // Firefox Sync) merges a folder recreated on two devices. The oldest one is always the
-// synced folder, so the choice doesn't change from one sync to the next; the number of
-// extra folders is recorded for the popup to tell the user.
+// synced folder, so the choice doesn't change from one sync to the next. The number of
+// extra folders, and which one is synced, are recorded for the popup to tell the user:
+// browsers don't show when a folder was created, so "the oldest" alone can't be found.
 function pickSyncFolder(results) {
     const folders = (results || []).filter(r => !r.url && r.title === SYNC_FOLDER_NAME);
     folders.sort((a, b) => ((a.dateAdded || 0) - (b.dateAdded || 0)) || String(a.id).localeCompare(String(b.id)));
     const extra = Math.max(folders.length - 1, 0);
-    chrome.storage.local.get(['duplicateSyncFolders'], (stored) => {
-        if ((stored.duplicateSyncFolders || 0) !== extra) chrome.storage.local.set({ duplicateSyncFolders: extra });
+    const syncedId = extra > 0 ? folders[0].id : null;
+    chrome.storage.local.get(['duplicateSyncFolders', 'syncedFolderId'], (stored) => {
+        if ((stored.duplicateSyncFolders || 0) !== extra || (stored.syncedFolderId || null) !== syncedId) {
+            chrome.storage.local.set({ duplicateSyncFolders: extra, syncedFolderId: syncedId });
+        }
     });
     return folders[0] || null;
 }
@@ -291,22 +302,16 @@ async function getOrCreateSyncFolder() {
     });
 }
 
-// Find, Create, or Move the Archive folder dynamically next to the Sync folder
+// The date folder of today's archive, inside the archive folder. The archive folder
+// is created next to the sync folder; once it exists it stays where the user put it.
 async function getOrCreateArchiveFolder(targetParentId, targetIndex) {
     const today = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD
 
-    // 1. Ensure the main Archive folder exists in the exact right place
+    // 1. The main archive folder: found anywhere, or created next to the sync folder
     const mainArchiveId = await new Promise((resolve) => {
         chrome.bookmarks.search({ title: ARCHIVE_FOLDER_NAME }, (results) => {
             const folder = results.find(r => !r.url);
-
-            if (folder) {
-                chrome.bookmarks.move(folder.id, { parentId: targetParentId, index: targetIndex }, (movedFolder) => {
-                    void chrome.runtime.lastError; // Can't go there: it stays where it is
-                    resolve(movedFolder ? movedFolder.id : folder.id);
-                });
-                return;
-            }
+            if (folder) return resolve(folder.id);
 
             chrome.bookmarks.create({ parentId: targetParentId, index: targetIndex, title: ARCHIVE_FOLDER_NAME }, (newFolder) => {
                 if (chrome.runtime.lastError || !newFolder) {
@@ -328,7 +333,10 @@ async function getOrCreateArchiveFolder(targetParentId, targetIndex) {
             const dateFolder = children.find(c => !c.url && c.title === today);
             if (dateFolder) return resolve(dateFolder.id);
 
-            chrome.bookmarks.create({ parentId: mainArchiveId, title: today }, (f) => resolve(f.id));
+            chrome.bookmarks.create({ parentId: mainArchiveId, title: today }, (f) => {
+                void chrome.runtime.lastError; // Then archived straight into the archive folder
+                resolve(f ? f.id : mainArchiveId);
+            });
         });
     });
 }
@@ -637,7 +645,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
     if (isSyncing) return sendResponse({ status: "locked", message: t('syncInProgress') });
     isSyncing = true;
 
-    chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId'], async (result) => {
+    chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId', 'lastSync'], async (result) => {
         if (!result.serverUrl || !result.username || !result.password || !result.extensionId) {
             isSyncing = false;
             return sendResponse({ status: "error", message: t('notSetUp'), quiet: true });
@@ -646,7 +654,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
         const { serverUrl, username, password, extensionId } = result;
         if (!(await hasServerAccess(serverUrl))) {
             isSyncing = false;
-            return sendResponse({ status: "error", message: NO_ACCESS_MESSAGE });
+            return sendResponse(noAccessResponse(result.lastSync));
         }
         const credentials = username + ':' + password;
         const authHeader = 'Basic ' + toBase64Utf8(credentials);
@@ -757,7 +765,7 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
     if (isSyncing) return sendResponse({ status: "locked", message: t('syncInProgress') });
     isSyncing = true;
 
-    chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId'], async (result) => {
+    chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId', 'lastSync'], async (result) => {
         if (!result.serverUrl || !result.username || !result.password || !result.extensionId) {
             isSyncing = false;
             return sendResponse({ status: "error", message: t('notSetUp'), quiet: true });
@@ -766,7 +774,7 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
         const { serverUrl, username, password, extensionId } = result;
         if (!(await hasServerAccess(serverUrl))) {
             isSyncing = false;
-            return sendResponse({ status: "error", message: NO_ACCESS_MESSAGE });
+            return sendResponse(noAccessResponse(result.lastSync));
         }
         const credentials = username + ':' + password;
         const authHeader = 'Basic ' + toBase64Utf8(credentials);
@@ -833,28 +841,31 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
 // ARCHIVE CLEANUP ROUTINE
 // ==========================================
 
+// Date folders are named after the UTC day (YYYY-MM-DD) their items were archived:
+// compared as days, so an item is kept at least retentionDays full days. The archive
+// folder itself is removed once empty (created again by the next archiving).
 async function cleanOldArchives() {
-    chrome.storage.local.get(['retentionDays'], (result) => {
-        const retentionDays = result.retentionDays || 30;
-        const thresholdDate = new Date();
-        thresholdDate.setDate(thresholdDate.getDate() - retentionDays);
+    const { retentionDays } = await new Promise(resolve => chrome.storage.local.get(['retentionDays'], resolve));
+    const cutoff = new Date(Date.now() - (retentionDays || 30) * 86400000).toISOString().split('T')[0];
 
-        chrome.bookmarks.search({ title: ARCHIVE_FOLDER_NAME }, (results) => {
-            const mainArchive = results.find(r => !r.url);
-            if (!mainArchive) return;
+    const results = await new Promise(resolve => chrome.bookmarks.search({ title: ARCHIVE_FOLDER_NAME }, resolve));
+    const mainArchive = (results || []).find(r => !r.url);
+    if (!mainArchive) return;
 
-            chrome.bookmarks.getChildren(mainArchive.id, (dateFolders) => {
-                for (const folder of dateFolders) {
-                    const folderDate = new Date(folder.title);
+    const children = await new Promise(resolve => chrome.bookmarks.getChildren(mainArchive.id, resolve));
+    let remaining = children.length;
+    for (const folder of children) {
+        if (folder.url || !/^\d{4}-\d{2}-\d{2}$/.test(folder.title) || folder.title >= cutoff) continue;
+        const removed = await new Promise(resolve => chrome.bookmarks.removeTree(folder.id, () => resolve(!chrome.runtime.lastError)));
+        if (removed) remaining--;
+        console.log(`♻️ Deleted old archive folder: ${folder.title}`);
+    }
 
-                    if (!isNaN(folderDate) && folderDate < thresholdDate) {
-                        chrome.bookmarks.removeTree(folder.id);
-                        console.log(`♻️ Deleted old archive folder: ${folder.title}`);
-                    }
-                }
-            });
-        });
-    });
+    // remove(), not removeTree(): the browser refuses it if the folder isn't empty after all.
+    // Not during a sync: it may be about to archive into this folder.
+    if (remaining === 0 && !isSyncing) {
+        chrome.bookmarks.remove(mainArchive.id, () => void chrome.runtime.lastError);
+    }
 }
 
 // ==========================================
@@ -999,10 +1010,14 @@ if (chrome.storage.onChanged) {
     });
 }
 
-// The badge isn't guaranteed to survive a browser restart: restore it from the record
+// Neither the badge nor the alarms are guaranteed to survive a browser restart
+// (Firefox drops alarms): the badge is restored from the record, the alarms are
+// created again. The automatic import then runs a minute after startup (time for the
+// network to come up), so bookmarks added on another computer show up right away.
 if (chrome.runtime.onStartup) {
     chrome.runtime.onStartup.addListener(() => {
         chrome.storage.local.get(['lastSync'], (result) => setFailureBadge(Boolean(result.lastSync && !result.lastSync.ok)));
+        createAlarms({ delayInMinutes: 1 });
     });
 }
 
@@ -1162,17 +1177,21 @@ async function seedSyncBaseAfterUpdate() {
     await saveSyncBase(fileUrl, withoutArchiveFolder(local.children));
 }
 
-chrome.runtime.onInstalled.addListener((details) => {
-    chrome.alarms.create("dailyCleanup", { periodInMinutes: 1440 });
-
-    if (details && details.reason === 'update') seedSyncBaseAfterUpdate();
-
+// The archive cleanup, and the automatic import unless automatic sync is paused.
+// firstRun: e.g. { delayInMinutes: 1 } to run them soon instead of after a full period.
+function createAlarms(firstRun = {}) {
+    chrome.alarms.create("dailyCleanup", { ...firstRun, periodInMinutes: 1440 });
     chrome.storage.local.get(['syncFrequency', 'autoSyncEnabled'], (result) => {
         if (result.autoSyncEnabled !== false) {
             const freq = parseInt(result.syncFrequency) || 15;
-            chrome.alarms.create("autoPullAlarm", { periodInMinutes: freq });
+            chrome.alarms.create("autoPullAlarm", { ...firstRun, periodInMinutes: freq });
         }
     });
+}
+
+chrome.runtime.onInstalled.addListener((details) => {
+    if (details && details.reason === 'update') seedSyncBaseAfterUpdate();
+    createAlarms();
 });
 
 // Listen to alarms

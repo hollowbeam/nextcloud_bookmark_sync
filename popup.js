@@ -143,24 +143,54 @@ document.addEventListener('DOMContentLoaded', async () => {
         $('version').textContent = `v${chrome.runtime.getManifest().version}`;
     }
 
-    // Several "🔄 Bookmark Sync" folders (counted by the background): only the oldest syncs
-    function renderDuplicateWarning(extra) {
-        const warning = $('duplicateWarning');
-        warning.hidden = !(extra > 0);
-        if (extra > 0) warning.textContent = t('duplicateFolders', extra);
+    // Where the synced folder is and how many bookmarks it holds, e.g. { place: "Bookmarks
+    // bar", count: 12 }: browsers don't show which folder is the oldest. null if not found.
+    async function describeFolder(id) {
+        if (!id || !chrome.bookmarks) return null;
+        const get = (nodeId) => new Promise(resolve => chrome.bookmarks.get(nodeId, (nodes) => {
+            void chrome.runtime.lastError; // Removed meanwhile
+            resolve(nodes && nodes[0]);
+        }));
+        const folder = await get(id);
+        if (!folder || !folder.parentId) return null;
+        const parent = await get(folder.parentId);
+        const tree = await new Promise(resolve => chrome.bookmarks.getSubTree(id, (nodes) => {
+            void chrome.runtime.lastError;
+            resolve(nodes && nodes[0]);
+        }));
+        if (!parent || !parent.title || !tree) return null;
+        // The archive folder, if it was moved inside, isn't synced
+        const count = (node) => (node.url ? 1 : node.title === '🗑️ Bookmark Archives' ? 0
+            : (node.children || []).reduce((sum, child) => sum + count(child), 0));
+        return { place: parent.title, count: count(tree) };
     }
 
-    chrome.storage.local.get(['lastSync', 'legacySeenAt', 'duplicateSyncFolders'], (result) => {
+    // Several "🔄 Bookmark Sync" folders (counted by the background): only the oldest syncs
+    async function renderDuplicateWarning(extra, syncedId) {
+        const warning = $('duplicateWarning');
+        warning.hidden = !(extra > 0);
+        if (!(extra > 0)) return;
+        const where = await describeFolder(syncedId);
+        warning.textContent = where
+            ? t('duplicateFoldersWhere', extra, where.place, where.count)
+            : t('duplicateFolders', extra);
+    }
+
+    chrome.storage.local.get(['lastSync', 'legacySeenAt', 'duplicateSyncFolders', 'syncedFolderId'], (result) => {
         renderLastSync(result.lastSync);
         renderLegacyWarning(result.legacySeenAt);
-        renderDuplicateWarning(result.duplicateSyncFolders);
+        renderDuplicateWarning(result.duplicateSyncFolders, result.syncedFolderId);
     });
 
     chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== 'local') return;
         if (changes.lastSync) renderLastSync(changes.lastSync.newValue);
         if (changes.legacySeenAt) renderLegacyWarning(changes.legacySeenAt.newValue);
-        if (changes.duplicateSyncFolders) renderDuplicateWarning(changes.duplicateSyncFolders.newValue);
+        if (changes.duplicateSyncFolders || changes.syncedFolderId) {
+            chrome.storage.local.get(['duplicateSyncFolders', 'syncedFolderId'], (result) => {
+                renderDuplicateWarning(result.duplicateSyncFolders, result.syncedFolderId);
+            });
+        }
         if (changes.serverUrl || changes.username || changes.password) {
             chrome.storage.local.get(['serverUrl', 'username', 'password'], updateSetupCard);
         }
@@ -331,6 +361,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         clearTimeout(statusClearTimer);
         $('checkSettings').hidden = true;
 
+        // Started before the permission prompt, which closes the popup in Firefox, but
+        // not awaited: Firefox only shows the prompt if asked straight from the click
+        const saving = flushPendingSaves();
         const accessError = await requestServerAccess($('serverUrl').value.trim());
         if (accessError) {
             show(resultEl, accessError, 'error');
@@ -340,7 +373,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         show(resultEl, busyText, 'busy');
         button.disabled = true;
-        await flushPendingSaves();
+        await saving;
         chrome.runtime.sendMessage({ action }, (reply) => {
             const response = backgroundResponse(reply);
             button.disabled = false;

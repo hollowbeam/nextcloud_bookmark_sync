@@ -244,5 +244,8 @@
   },
   "duplicateFolders": {
     "message": "⚠️ $1 more \"🔄 Bookmark Sync\" folder(s) found (often after the browser's own sync). Only the oldest one is synced: move what you need into it, then delete the others."
+  },
+  "duplicateFoldersWhere": {
+    "message": "⚠️ $1 more \"🔄 Bookmark Sync\" folder(s) found (often after the browser's own sync). Only one is synced: the one in \"$2\", holding $3 bookmark(s). Move what you need into it, then delete the others."
   }
 }
