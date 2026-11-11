@@ -1,0 +1,18 @@
+{
+  "name": "nextcloud-bookmark-sync",
+  "private": true,
+  "description": "Development tooling only: the extension itself has no dependencies and no build step.",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "test": "node --test",
+    "e2e:server": "bash tests/e2e/server.sh start",
+    "e2e:server:stop": "bash tests/e2e/server.sh stop",
+    "e2e": "node tests/e2e/sync.e2e.js",
+    "package": "node tools/package.js",
+    "e2e:package": "node tests/e2e/package.e2e.js",
+    "screenshots": "node tools/store-screenshots.js en && node tools/store-screenshots.js fr"
+  },
+  "devDependencies": {
+    "playwright": "1.49.1"
+  }
+}
