@@ -25,7 +25,7 @@ function makeBookmarks(runtime) {
     const view = (n) => ({ id: n.id, parentId: n.parentId, title: n.title, url: n.url, index: n.parentId ? nodes.get(n.parentId).children.indexOf(n.id) : 0 });
     const fail = (cb, message) => { runtime.lastError = { message }; cb(undefined); runtime.lastError = undefined; };
     const moves = [];
-    return {
+    const api = {
         moves,
         nodes,
         search: ({ title }, cb) => setImmediate(() => cb([...nodes.values()].filter(n => n.title === title).map(view))),
@@ -57,7 +57,14 @@ function makeBookmarks(runtime) {
         }),
         update: (id, changes, cb) => setImmediate(() => { Object.assign(nodes.get(id), changes); cb(view(nodes.get(id))); }),
         removeTree: () => {},
+        // The extension's listeners, so tests can fire browser events
+        events: {},
+        onCreated: { addListener(f) { api.events.created = f; } },
+        onRemoved: { addListener(f) { api.events.removed = f; } },
+        onChanged: { addListener(f) { api.events.changed = f; } },
+        onMoved: { addListener(f) { api.events.moved = f; } },
     };
+    return api;
 }
 
 function loadBackground(server) {
@@ -82,6 +89,7 @@ function loadBackground(server) {
     const badge = { text: '', color: null };
     const storageListeners = [];
     const access = { granted: true };
+    const alarms = {};
     const sandbox = {
         chrome: {
             runtime, bookmarks,
@@ -95,7 +103,11 @@ function loadBackground(server) {
                 onChanged: { addListener(f) { storageListeners.push(f); } },
             },
             permissions: { contains: (p, cb) => setImmediate(() => cb(access.granted)) },
-            alarms: { create() {}, clear() {}, onAlarm: { addListener() {} } },
+            alarms: {
+                create: (name, info) => { alarms[name] = info; },
+                clear: (name) => { delete alarms[name]; },
+                onAlarm: { addListener(f) { alarms.fire = (name) => f({ name }); } },
+            },
             action: {
                 setBadgeText: ({ text }) => { badge.text = text; },
                 setBadgeBackgroundColor: ({ color }) => { badge.color = color; },
@@ -120,7 +132,7 @@ function loadBackground(server) {
     // Runs the onInstalled listener and waits for its async work
     const installed = async (details) => { runtime.installed(details); await flush(); };
     const storageChanged = (changes) => storageListeners.forEach(f => f(changes, 'local'));
-    return { sandbox, log, timers, bookmarks, seed, addLocal, titlesIn, flush, call, control, store, installed, badge, access, storageChanged };
+    return { sandbox, log, timers, bookmarks, seed, addLocal, titlesIn, flush, call, control, store, installed, badge, access, storageChanged, alarms };
 }
 
 // No lock and no remote file yet
@@ -255,7 +267,10 @@ test('auto-push: retries while locked, then exports once', async () => {
 test('auto-push: an export fired during a local import is retried, not dropped', async () => {
     const state = { remote: { children: [] } };
     const b = loadBackground(davServer(state));
-    await b.seed();
+    const id = await b.seed();
+    await b.addLocal(id, 'L', 'https://l.example/');
+    // Synced before with an empty server: L is a local addition, kept by the import
+    b.store.syncBase = { fileUrl: JSON_URL, children: [] };
     b.sandbox.scheduleAutomaticPush();
     await b.flush();
     assert.strictEqual(b.timers.length, 1);
@@ -270,7 +285,8 @@ test('auto-push: an export fired during a local import is retried, not dropped',
     open();
     await pulling;
     await b.flush();
-    b.timers[1].fn();
+    // The import kept L and scheduled its own export, superseding the retry
+    b.timers[b.timers.length - 1].fn();
     await b.flush();
     assert.ok(b.log.includes('PUT bookmarks_sync.json'));
 });
@@ -329,7 +345,7 @@ test('pull: refused entries are skipped and counted, positions stay contiguous',
     assert.deepStrictEqual(b.bookmarks.moves.map(m => m.index), [0, 1]);
 });
 
-test('pull: plain message when nothing is skipped, lock released after the delay', async () => {
+test('pull: plain message when nothing is skipped, lock released at the end', async () => {
     const b = loadBackground((url, opts) => {
         if (url === LOCK_URL && opts.method === 'GET') return { status: 404 };
         if (url === JSON_URL) return { status: 200, body: { children: [{ title: 'A', url: 'https://a.example/' }] } };
@@ -339,10 +355,8 @@ test('pull: plain message when nothing is skipped, lock released after the delay
     const res = await b.call('pullBookmarksFromServer');
     await b.flush();
     assert.strictEqual(res.message, '1 item imported!');
-    const removal = b.timers.find(t => t.ms === 2000);
-    assert.ok(removal, 'lock removal not scheduled');
-    await removal.fn();
     assert.strictEqual(b.log[b.log.length - 1], 'DELETE bookmarks_sync.lock');
+    assert.ok(!b.timers.some(t => t.ms === 2000), 'delayed lock removal still scheduled');
 });
 
 test('pull: backs off when another device holds the lock', async () => {
@@ -353,19 +367,18 @@ test('pull: backs off when another device holds the lock', async () => {
     assert.deepStrictEqual(b.log, ['GET bookmarks_sync.lock']);
 });
 
-test("pull: the delayed lock removal does not delete the next push's lock", async () => {
+test('pull: the sync ends only once its lock is released, so the next sync keeps its own', async () => {
     const state = { remote: { children: [] } };
     const b = loadBackground(davServer(state));
-    await b.seed();
+    const id = await b.seed();
     await b.call('pullBookmarksFromServer');
     await b.flush();
-    const removal = b.timers.find(t => t.ms === 2000);
-    assert.ok(removal);
-    await b.call('pushBookmarksToServer');
+    await b.addLocal(id, 'L', 'https://l.example/');
+    assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
     await b.flush();
-    await removal.fn();
-    await b.flush();
-    assert.strictEqual(b.log.filter(l => l === 'DELETE bookmarks_sync.lock').length, 1);
+    // Each sync removed its own lock once, in order
+    const lockOps = b.log.filter(l => l.endsWith('bookmarks_sync.lock') && !l.startsWith('GET'));
+    assert.deepStrictEqual(lockOps, ['PUT bookmarks_sync.lock', 'DELETE bookmarks_sync.lock', 'PUT bookmarks_sync.lock', 'DELETE bookmarks_sync.lock']);
 });
 
 test('pull: a lock file with a non-string owner is ignored', async () => {
@@ -485,6 +498,7 @@ test('push: a write between our read and our upload is refused (412), nothing ov
     });
     const id = await b.seed();
     await b.addLocal(id, 'A', bm('A').url);
+    await b.addLocal(id, 'L', bm('L').url);
     b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A')] };
     const res = await b.call('pushBookmarksToServer');
     await b.flush();
@@ -607,9 +621,10 @@ test('push: a failed upload after a merge leaves the remote we read as the base'
     const b = loadBackground((url, opts) => (url === JSON_URL && opts.method === 'PUT') ? { status: 503 } : server(url, opts));
     const id = await b.seed();
     await b.addLocal(id, 'A', bm('A').url);
+    await b.addLocal(id, 'L', bm('L').url);
     b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A')] };
     assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'error');
-    assert.deepStrictEqual(b.titlesIn(id), ['A', 'R']);
+    assert.deepStrictEqual(b.titlesIn(id).sort(), ['A', 'L', 'R']);
     assert.deepStrictEqual(titles(b.store.syncBase.children), ['A', 'R']);
 });
 
@@ -726,14 +741,15 @@ test('push: after a 412 the remote read becomes the base, so a third-device dele
     });
     const id = await b.seed();
     await b.addLocal(id, 'A', bm('A').url);
+    await b.addLocal(id, 'L', bm('L').url);
     b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A')] };
     assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'locked');
     await b.flush();
-    assert.deepStrictEqual(b.titlesIn(id), ['A', 'R'], 'merge applied locally');
+    assert.deepStrictEqual(b.titlesIn(id).sort(), ['A', 'L', 'R'], 'merge applied locally');
     assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
     await b.flush();
-    assert.deepStrictEqual(titles(state.remote.children), ['A'], 'R resurrected');
-    assert.deepStrictEqual(b.titlesIn(id), ['A']);
+    assert.deepStrictEqual(titles(state.remote.children), ['A', 'L'], 'R resurrected');
+    assert.deepStrictEqual(b.titlesIn(id), ['A', 'L']);
 });
 
 // ------------------------------------------------------------------
@@ -914,6 +930,148 @@ test('connection test: other files with a similar name are not the bookmarks fil
 });
 
 
+
+// ------------------------------------------------------------------
+// Fewer exports, service worker robustness, old-version devices
+// ------------------------------------------------------------------
+
+test('push: nothing new for the server means no upload', async () => {
+    const state = { remote: { title: 'root', children: [bm('A')] } };
+    const { b } = await deviceWith(state, [bm('A')], [bm('A')]);
+    const res = await b.call('pushBookmarksToServer');
+    await b.flush();
+    assert.deepStrictEqual([res.status, res.message], ['success', 'Already up to date.']);
+    assert.strictEqual(state.puts, undefined);
+    assert.strictEqual(b.log[b.log.length - 1], 'DELETE bookmarks_sync.lock');
+});
+
+test('push: remote changes applied locally with nothing to send back skip the upload too', async () => {
+    const state = { remote: { title: 'root', children: [bm('A'), bm('R')] } };
+    const { b, id } = await deviceWith(state, [bm('A')], [bm('A')]);
+    const res = await b.call('pushBookmarksToServer');
+    await b.flush();
+    assert.strictEqual(res.message, 'Remote changes applied, nothing new to send.');
+    assert.strictEqual(state.puts, undefined);
+    assert.deepStrictEqual(b.titlesIn(id), ['A', 'R']);
+    assert.deepStrictEqual(titles(b.store.syncBase.children), ['A', 'R']);
+});
+
+test('auto-push: only changes inside the sync folder schedule an export', async () => {
+    const b = loadBackground(noLock);
+    const syncId = await b.seed();
+    const sub = await b.addLocal(syncId, 'Sub');
+    const outside = await b.addLocal('1', 'Elsewhere', 'https://elsewhere.example/');
+    const exports = () => b.timers.filter(t => t.ms === 5000).length;
+    const ev = b.bookmarks.events;
+
+    ev.created(outside.id, { parentId: '1' });
+    ev.changed(outside.id);
+    ev.removed('999', { parentId: '1' });
+    ev.moved(outside.id, { parentId: '1', oldParentId: '1' });
+    await b.flush();
+    assert.strictEqual(exports(), 0, 'export for a change outside the folder');
+
+    ev.created('x', { parentId: sub.id }); // nested inside the sync folder
+    await b.flush();
+    assert.strictEqual(exports(), 1);
+    ev.moved(outside.id, { parentId: '1', oldParentId: syncId }); // moved out of it
+    await b.flush();
+    assert.strictEqual(exports(), 2);
+});
+
+test('auto-push: events during a sync are ignored before the folder lookup', async () => {
+    const b = loadBackground(noLock);
+    const syncId = await b.seed();
+    vm.runInContext('isSyncing = true', b.sandbox);
+    b.bookmarks.events.created('x', { parentId: syncId });
+    vm.runInContext('isSyncing = false', b.sandbox);
+    await b.flush();
+    assert.strictEqual(b.timers.filter(t => t.ms === 5000).length, 0);
+});
+
+test('auto-push: a backup alarm is set with the timer, cleared once the export ran', async () => {
+    const state = { remote: null };
+    const b = loadBackground(davServer(state));
+    const id = await b.seed();
+    await b.addLocal(id, 'L', 'https://l.example/');
+    b.sandbox.scheduleAutomaticPush();
+    await b.flush();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(b.alarms.pendingExport)), { delayInMinutes: 1 });
+    b.timers[0].fn();
+    await b.flush();
+    assert.strictEqual(b.alarms.pendingExport, undefined);
+    assert.deepStrictEqual(titles(state.remote.children), ['L']);
+});
+
+test('auto-push: the backup alarm exports if the service worker lost the timer', async () => {
+    const state = { remote: null };
+    const b = loadBackground(davServer(state));
+    const id = await b.seed();
+    await b.addLocal(id, 'L', 'https://l.example/');
+    b.alarms.fire('pendingExport'); // as after a service worker restart: no timer any more
+    await b.flush();
+    assert.deepStrictEqual(titles(state.remote.children), ['L']);
+});
+
+test('auto-push: turning auto-sync off clears the backup alarm', async () => {
+    const b = loadBackground(noLock);
+    await b.seed();
+    b.sandbox.scheduleAutomaticPush();
+    await b.flush();
+    assert.ok(b.alarms.pendingExport);
+    b.store.autoSyncEnabled = false;
+    b.alarms.fire('pendingExport');
+    await b.flush();
+    assert.strictEqual(b.alarms.pendingExport, undefined);
+    assert.deepStrictEqual(b.log, []);
+});
+
+test('old version: a raw file from 1.5.1 or older is noted, a 1.6.0+ file is not', async () => {
+    const raw = { id: '42', title: '🔄 Bookmark Sync', dateAdded: 1, children: [{ id: '43', title: 'A', url: bm('A').url, dateAdded: 1 }] };
+    let b = loadBackground((url, opts) => (url === JSON_URL && opts.method === 'GET') ? { status: 200, body: raw } : noLock(url, opts));
+    await b.seed();
+    await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.ok(Date.now() - b.store.legacySeenAt < 1000);
+
+    b = loadBackground((url, opts) => (url === JSON_URL && opts.method === 'GET') ? { status: 200, body: { title: 'root', children: [bm('A')] } } : noLock(url, opts));
+    await b.seed();
+    await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual(b.store.legacySeenAt, undefined);
+});
+
+test('old version: a raw file is rewritten in the new format even when nothing changed', async () => {
+    const raw = { id: '42', title: 'root', dateAdded: 1, children: [{ id: '43', title: 'A', url: bm('A').url }] };
+    const state = { remote: raw };
+    const { b } = await deviceWith(state, [bm('A')], [bm('A')]);
+    const res = await b.call('pushBookmarksToServer');
+    assert.strictEqual(res.status, 'success', res.message);
+    assert.strictEqual(state.puts, 1);
+    assert.strictEqual(state.remote.id, undefined);
+});
+
+const permissions = (folder, file) => FOLDER.replace('</d:prop>', `<oc:permissions>${folder}</oc:permissions></d:prop>`)
+    + (file === undefined ? '' : `<d:response><d:href>/dav/bookmarks_sync.json</d:href><d:propstat><d:prop><oc:permissions>${file}</oc:permissions></d:prop></d:propstat></d:response>`)
+    + '</d:multistatus>';
+
+test('connection test: a read-only folder or file is reported', async () => {
+    const readOnly = "Connected, but this folder is read-only for you: the extension can't save the bookmarks file there.";
+    assert.strictEqual((await testConnection(propfind(207, permissions('SG')))).message, readOnly);
+    assert.strictEqual((await testConnection(propfind(207, permissions('RGDNVCK', 'SG')))).message, readOnly);
+    assert.strictEqual((await testConnection(propfind(207, permissions('RGDNVCK')))).status, 'success');
+    assert.strictEqual((await testConnection(propfind(207, permissions('SG', 'RGDNVW')))).status, 'success');
+    // No oc:permissions (another WebDAV server): nothing to check
+    assert.strictEqual((await testConnection(propfind(207, FOLDER + '</d:multistatus>'))).status, 'success');
+});
+
+test('connection test: asks for the permissions in the PROPFIND body', async () => {
+    let sent;
+    await testConnection((url, opts) => { sent = opts; return { status: 207, body: FOLDER + '</d:multistatus>' }; });
+    assert.match(sent.body, /<oc:permissions\/>/);
+    assert.strictEqual(sent.headers['Content-Type'], 'application/xml');
+});
+
 // ------------------------------------------------------------------
 // Popup
 // ------------------------------------------------------------------
@@ -944,7 +1102,10 @@ async function popup(serverUrl, { button = 'pushBtn', fields = {}, response = { 
         chrome: {
             storage: { local: { get: (k, cb) => cb({ ...stored }), set: (o, cb) => cb && cb() }, onChanged: { addListener() {} } },
             permissions: { request: (p, cb) => { requests.push(p.origins[0]); cb(true); } },
-            runtime: { sendMessage: (m, cb) => { sent.push(m.action); messages.push(m); if (cb) cb(response); } },
+            runtime: {
+                sendMessage: (m, cb) => { sent.push(m.action); messages.push(m); if (cb) cb(response); },
+                getManifest: () => ({ version: '9.8.7' }),
+            },
         },
     };
     vm.createContext(sandbox);
@@ -960,6 +1121,8 @@ async function popup(serverUrl, { button = 'pushBtn', fields = {}, response = { 
         testResult: el('testResult').textContent,
         setupHidden: el('setupCard').hidden,
         lastSync: el('lastSync').textContent,
+        legacyHidden: el('legacyWarning').hidden,
+        version: el('version').textContent,
         el,
     };
 }
@@ -1024,4 +1187,14 @@ test('popup: editing a field clears an earlier connection test result', async ()
     assert.strictEqual(r.testResult, 'Connected. Bookmarks file found on the server.');
     r.el('password').listeners.input();
     assert.strictEqual(r.el('testResult').textContent, '');
+});
+
+test('popup: the installed version is shown on the main screen', async () => {
+    assert.strictEqual((await popup('')).version, 'v9.8.7');
+});
+
+test('popup: the old-version warning shows for a week after such a file was seen', async () => {
+    assert.strictEqual((await popup('')).legacyHidden, true);
+    assert.strictEqual((await popup('', { stored: { legacySeenAt: Date.now() - 60000 } })).legacyHidden, false);
+    assert.strictEqual((await popup('', { stored: { legacySeenAt: Date.now() - 8 * 86400000 } })).legacyHidden, true);
 });

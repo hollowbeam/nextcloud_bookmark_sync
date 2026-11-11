@@ -75,11 +75,26 @@ document.addEventListener('DOMContentLoaded', async () => {
             : `Last ${what.toLowerCase()} failed (${when}): ${lastSync.message}`;
     }
 
-    chrome.storage.local.get(['lastSync'], (result) => renderLastSync(result.lastSync));
+    // A file written by a device on 1.5.1 or older was seen recently (set by the background)
+    const LEGACY_WARNING_MS = 7 * 24 * 60 * 60 * 1000;
+    function renderLegacyWarning(legacySeenAt) {
+        document.getElementById('legacyWarning').hidden = !(legacySeenAt && Date.now() - legacySeenAt < LEGACY_WARNING_MS);
+    }
+
+    // Version of the installed extension, handy when helping someone or reporting a bug
+    if (chrome.runtime.getManifest) {
+        document.getElementById('version').textContent = `v${chrome.runtime.getManifest().version}`;
+    }
+
+    chrome.storage.local.get(['lastSync', 'legacySeenAt'], (result) => {
+        renderLastSync(result.lastSync);
+        renderLegacyWarning(result.legacySeenAt);
+    });
 
     chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== 'local') return;
         if (changes.lastSync) renderLastSync(changes.lastSync.newValue);
+        if (changes.legacySeenAt) renderLegacyWarning(changes.legacySeenAt.newValue);
         if (changes.serverUrl || changes.username || changes.password) {
             chrome.storage.local.get(['serverUrl', 'username', 'password'], updateSetupCard);
         }

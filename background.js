@@ -26,9 +26,10 @@ const ARCHIVE_FOLDER_NAME = "🗑️ Bookmark Archives";
 const LOCK_FILE_NAME = "bookmarks_sync.lock";
 const LOCK_STALE_MS = 5 * 60 * 1000; // Ignore locks older than this (crashed device safety net)
 
+const PENDING_EXPORT_ALARM = "pendingExport";
+
 let isSyncing = false;
 let syncTimeout = null;
-let pendingLockRemoval = null;
 
 // ==========================================
 // ERROR MESSAGES
@@ -198,15 +199,7 @@ async function acquireLock(baseUrl, authHeader, extensionId) {
     const created = await createLock(baseUrl, authHeader, extensionId);
     if (created.busy) return { status: "locked", message: BUSY_MESSAGE };
     if (created.error) return { status: "error", message: created.error };
-    const lockFile = created.lockFile;
-
-    // The lock we just wrote replaces the previous pull's: its delayed removal would delete ours
-    if (pendingLockRemoval) {
-        clearTimeout(pendingLockRemoval);
-        pendingLockRemoval = null;
-    }
-
-    return { lockFile };
+    return { lockFile: created.lockFile };
 }
 
 function toBase64Utf8(str) {
@@ -437,7 +430,16 @@ async function fetchRemoteTree(fileUrl, authHeader) {
         console.warn("Remote file is not valid JSON:", error);
     }
     const valid = data && typeof data === 'object' && Array.isArray(data.children);
-    return { exists: true, tree: valid ? normalizeNode(data) : null, etag };
+    // 1.6.0 and later write only titles, URLs and children; older versions upload the
+    // browser's raw tree, with ids and dates
+    const legacy = Boolean(valid && ('id' in data || 'dateAdded' in data));
+    return { exists: true, tree: valid ? normalizeNode(data) : null, etag, legacy };
+}
+
+// Remembers when a file from an old-version device was last seen: such a device
+// overwrites without merging, so the popup asks to update it
+function noteRemoteFormat(remote) {
+    if (remote.legacy) chrome.storage.local.set({ legacySeenAt: Date.now() });
 }
 
 // Makes the local sync folder match targetNodes: creates what is missing, updates
@@ -578,6 +580,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
 
             const local = normalizeNode(await getBookmarksTreeAsync(syncFolderId));
             const remote = await fetchRemoteTree(fileUrl, authHeader);
+            noteRemoteFormat(remote);
             const savedBase = await loadSyncBase(fileUrl);
 
             // Another device exported since our last sync: merge its changes instead
@@ -595,6 +598,15 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
                 // The merge is applied locally: if the upload fails, the remote we read
                 // is the base, so its items aren't mistaken for local additions next time
                 await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped));
+            }
+
+            // Nothing new for the server: no upload, so no new ETag for other devices
+            // to download, and less contention on the file. A file from an old-version
+            // device is still rewritten, so it no longer reads as one.
+            if (remote.tree && !remote.legacy && sameTree(uploadChildren, remote.tree.children)) {
+                await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped));
+                const message = remoteChanged ? "Remote changes applied, nothing new to send." : "Already up to date.";
+                return sendResponse({ status: "success", message });
             }
 
             const putFile = (conditionHeader) => davFetch(fileUrl, {
@@ -670,18 +682,18 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
         const baseUrl = serverUrl.endsWith('/') ? serverUrl : serverUrl + '/';
         const fileUrl = baseUrl + 'bookmarks_sync.json';
 
-        const lock = await acquireLock(baseUrl, authHeader, extensionId);
-        if (!lock.lockFile) {
-            isSyncing = false;
-            return sendResponse({ status: lock.status, message: lock.message });
-        }
-        const myLockFile = lock.lockFile;
+        let myLockFile = null;
+        let exportNeeded = false;
 
         try {
+            const lock = await acquireLock(baseUrl, authHeader, extensionId);
+            if (!lock.lockFile) return sendResponse({ status: lock.status, message: lock.message });
+            myLockFile = lock.lockFile;
+
             const remote = await fetchRemoteTree(fileUrl, authHeader);
+            noteRemoteFormat(remote);
 
             if (!remote.tree) {
-                isSyncing = false;
                 const message = remote.exists ? "Invalid remote file. Export to replace it." : "No bookmarks file on the server yet: export from a device first.";
                 // Normal before the first export: told in the popup, not flagged on the icon
                 return sendResponse({ status: "error", message, quiet: !remote.exists });
@@ -701,7 +713,6 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             const { addedCount, renamedCount, skippedCount, skipped } = await applyTreeToLocal(syncFolderId, target);
             await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped));
 
-            isSyncing = false;
             const notes = [];
             if (renamedCount > 0) notes.push(`${renamedCount} renamed`);
             if (skippedCount > 0) notes.push(`${skippedCount} skipped`);
@@ -710,17 +721,18 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             sendResponse({ status: "success", message: `${addedCount} ${itemWord} imported!${notesText}` });
 
             // Kept local changes still have to reach the server
-            if (!sameTree(target, remote.tree.children)) scheduleAutomaticPush();
+            exportNeeded = !sameTree(target, remote.tree.children);
 
         } catch (error) {
             console.error("PULL Error:", error);
-            isSyncing = false;
             sendResponse(failureResponse(error, "Import failed."));
         } finally {
-            pendingLockRemoval = setTimeout(async () => {
-                pendingLockRemoval = null;
-                await removeLock(baseUrl, authHeader, myLockFile);
-            }, 2000);
+            // The lock goes before the sync ends: a sync starting in between would
+            // otherwise have its fresh lock deleted. This also gives the bookmark
+            // events caused by the import time to arrive while isSyncing is set.
+            await removeLock(baseUrl, authHeader, myLockFile);
+            isSyncing = false;
+            if (exportNeeded) scheduleAutomaticPush();
         }
     });
 }
@@ -757,23 +769,33 @@ async function cleanOldArchives() {
 // AUTOMATIC TRIGGER & DEBOUNCING
 // ==========================================
 
+// Runs a scheduled automatic export
+async function runAutomaticPush() {
+    // Auto-sync may have been turned off since this export was scheduled
+    const { autoSyncEnabled } = await new Promise(resolve => chrome.storage.local.get(['autoSyncEnabled'], resolve));
+    if (autoSyncEnabled === false) {
+        chrome.alarms.clear(PENDING_EXPORT_ALARM);
+        return;
+    }
+
+    pushBookmarksToServer((response) => {
+        // A held lock (local sync or another device) must delay this export, not drop it
+        if (response.status === "locked") {
+            armAutomaticPush();
+        } else {
+            chrome.alarms.clear(PENDING_EXPORT_ALARM);
+        }
+    });
+}
+
 function armAutomaticPush() {
     if (syncTimeout) clearTimeout(syncTimeout);
-
-    syncTimeout = setTimeout(async () => {
+    // The browser may stop the service worker before the timer fires; an alarm
+    // survives that and wakes it up, so the export still happens (a minute later)
+    chrome.alarms.create(PENDING_EXPORT_ALARM, { delayInMinutes: 1 });
+    syncTimeout = setTimeout(() => {
         syncTimeout = null;
-        // Auto-sync may have been turned off since this export was scheduled
-        const { autoSyncEnabled } = await new Promise(resolve => chrome.storage.local.get(['autoSyncEnabled'], resolve));
-        if (autoSyncEnabled === false) return;
-
-        // A held lock (local sync or another device) must delay this export, not drop it
-        pushBookmarksToServer((response) => {
-            if (response.status !== "locked") return;
-
-            chrome.storage.local.get(['autoSyncEnabled'], (result) => {
-                if (result.autoSyncEnabled !== false) armAutomaticPush();
-            });
-        });
+        runAutomaticPush();
     }, 5000);
 }
 
@@ -785,6 +807,39 @@ function scheduleAutomaticPush() {
         if (isSyncing) return; // Ignores the bookmark events caused by an import
 
         armAutomaticPush();
+    });
+}
+
+// The sync folder's id, without creating it (unlike getOrCreateSyncFolder)
+function findSyncFolderId() {
+    return new Promise(resolve => chrome.bookmarks.search({ title: SYNC_FOLDER_NAME }, (results) => {
+        const folder = (results || []).find(r => !r.url);
+        resolve(folder ? folder.id : null);
+    }));
+}
+
+async function isInsideSyncFolder(id) {
+    const syncFolderId = await findSyncFolderId();
+    let current = id;
+    for (let depth = 0; syncFolderId && current && depth < 100; depth++) {
+        if (current === syncFolderId) return true;
+        const nodes = await new Promise(resolve => chrome.bookmarks.get(current, (result) => {
+            void chrome.runtime.lastError; // A node removed meanwhile: not ours to sync
+            resolve(result);
+        }));
+        if (!nodes || !nodes[0]) return false;
+        current = nodes[0].parentId;
+    }
+    return false;
+}
+
+// Bookmark events from the whole browser: only changes inside the sync folder
+// schedule an export. ids are the nodes whose ancestry decides (the parent for a
+// created or removed bookmark, both parents for a move).
+function onBookmarkEvent(...ids) {
+    if (isSyncing) return; // Events caused by our own import or merge
+    Promise.all(ids.filter(Boolean).map(isInsideSyncFolder)).then((inside) => {
+        if (inside.some(Boolean)) scheduleAutomaticPush();
     });
 }
 
@@ -848,7 +903,10 @@ async function testConnection({ serverUrl, username, password }) {
         response = await fetch(baseUrl, {
             method: 'PROPFIND',
             credentials: 'omit',
-            headers: { 'Authorization': authHeader, 'Depth': '1' }
+            headers: { 'Authorization': authHeader, 'Depth': '1', 'Content-Type': 'application/xml' },
+            // oc:permissions is Nextcloud's: it tells whether we can write there
+            body: '<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">'
+                + '<d:prop><d:resourcetype/><oc:permissions/></d:prop></d:propfind>'
         });
     } catch (error) {
         console.error("Connection test failed:", error);
@@ -868,12 +926,28 @@ async function testConnection({ serverUrl, username, password }) {
         console.error("Connection test failed:", error);
         return { status: "error", message: NETWORK_ERROR_MESSAGE };
     }
-    if (!/<([a-z0-9]+:)?collection\s*\/>/i.test(body)) {
+    // One block per resource: the folder itself first, then its children
+    const blocks = body.split(/<\/(?:[a-z0-9]+:)?response>/i);
+    const folderBlock = blocks[0];
+    if (!/<([a-z0-9]+:)?collection\s*\/>/i.test(folderBlock)) {
         return { status: "error", message: "This URL points to a file. Use the URL of a folder." };
     }
 
     // An <href> ending with the file name, not e.g. old_bookmarks_sync.json or a .bak
-    const hasFile = /\/bookmarks_sync\.json\s*<\//.test(body);
+    const fileBlock = blocks.find(block => /\/bookmarks_sync\.json\s*<\//.test(block));
+    const hasFile = Boolean(fileBlock);
+
+    // Nextcloud permission letters: C = create files in a folder, W = write a file.
+    // Absent on other WebDAV servers: then nothing is checked.
+    const permissionsOf = (block) => {
+        const match = block && block.match(/<(?:[a-z0-9]+:)?permissions>([^<]*)</i);
+        return match ? match[1] : null;
+    };
+    const writable = hasFile ? permissionsOf(fileBlock) : permissionsOf(folderBlock);
+    if (writable !== null && !writable.includes(hasFile ? 'W' : 'C')) {
+        return { status: "error", message: "Connected, but this folder is read-only for you: the extension can't save the bookmarks file there." };
+    }
+
     return {
         status: "success",
         message: hasFile
@@ -912,6 +986,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 clearTimeout(syncTimeout);
                 syncTimeout = null;
             }
+            chrome.alarms.clear(PENDING_EXPORT_ALARM);
         }
         sendResponse({ status: "success" });
     } else if (request.action === "update_alarm") {
@@ -966,6 +1041,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
                 pullBookmarksFromServer();
             }
         });
+    } else if (alarm.name === PENDING_EXPORT_ALARM) {
+        // Backup for an automatic export lost when the service worker was stopped
+        runAutomaticPush();
     } else if (alarm.name === "dailyCleanup") {
         cleanOldArchives();
     }
@@ -976,17 +1054,17 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // ==========================================
 
 if (chrome.bookmarks.onCreated) {
-    chrome.bookmarks.onCreated.addListener(scheduleAutomaticPush);
+    chrome.bookmarks.onCreated.addListener((id, node) => onBookmarkEvent(node && node.parentId));
 }
 if (chrome.bookmarks.onRemoved) {
-    chrome.bookmarks.onRemoved.addListener(scheduleAutomaticPush);
+    chrome.bookmarks.onRemoved.addListener((id, removeInfo) => onBookmarkEvent(removeInfo && removeInfo.parentId));
 }
 if (chrome.bookmarks.onChanged) {
-    chrome.bookmarks.onChanged.addListener(scheduleAutomaticPush);
+    chrome.bookmarks.onChanged.addListener((id) => onBookmarkEvent(id));
 }
 if (chrome.bookmarks.onMoved) {
-    chrome.bookmarks.onMoved.addListener(scheduleAutomaticPush);
+    chrome.bookmarks.onMoved.addListener((id, moveInfo) => onBookmarkEvent(moveInfo && moveInfo.parentId, moveInfo && moveInfo.oldParentId));
 }
 if (chrome.bookmarks.onChildrenReordered) {
-    chrome.bookmarks.onChildrenReordered.addListener(scheduleAutomaticPush);
+    chrome.bookmarks.onChildrenReordered.addListener((id) => onBookmarkEvent(id));
 }

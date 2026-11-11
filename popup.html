@@ -38,6 +38,8 @@
         /* Last sync line */
         #lastSync { margin-top: 8px; font-size: 11px; color: #777; text-align: center; }
         #lastSync.failed { color: #c0392b; }
+        .warning { margin-top: 10px; padding: 8px 10px; font-size: 11px; color: #8a5a00; background: #fff4e0; border: 1px solid #f0c987; border-radius: 6px; }
+        #version { margin-top: 12px; font-size: 10px; color: #aaa; text-align: right; }
 
         /* First-run setup card */
         .setup-card { background: #eaf4fb; border: 1px solid #b6dcf2; border-radius: 6px; padding: 10px 12px; font-size: 12px; margin-bottom: 4px; }
@@ -163,6 +165,8 @@
 
         <div id="status"></div>
         <div id="lastSync"></div>
+        <div id="legacyWarning" class="warning" hidden>⚠️ A device still runs version 1.5.1 or older: it overwrites changes made elsewhere. Update the extension on all your devices.</div>
+        <div id="version"></div>
     </div>
 
     <div id="settingsView" class="view">
