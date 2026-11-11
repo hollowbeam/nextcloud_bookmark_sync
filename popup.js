@@ -340,6 +340,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             password: $('password').value.trim(),
         };
 
+        // Started before the permission prompt, which closes the popup in Firefox, but
+        // not awaited: the prompt must be requested straight from the click
+        flushPendingSaves();
         const accessError = await requestServerAccess(settings.serverUrl);
         if (accessError) return show(testResult, accessError, 'error');
 

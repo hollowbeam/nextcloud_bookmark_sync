@@ -44,6 +44,7 @@ function makeBookmarks(runtime) {
         get: (id, cb) => setImmediate(() => (nodes.has(id) ? cb([view(nodes.get(id))]) : fail(cb, "Can't find bookmark for id."))),
         getChildren: (id, cb) => setImmediate(() => cb(nodes.get(id).children.map(c => view(nodes.get(c))))),
         getSubTree: (id, cb) => setImmediate(() => {
+            if (!nodes.has(id)) return fail(cb, "Can't find parent bookmark for id.");
             const build = (n) => ({ ...view(n), children: n.children ? n.children.map(c => build(nodes.get(c))) : undefined });
             cb([build(nodes.get(id))]);
         }),
@@ -133,7 +134,8 @@ function loadBackground(server, { locale = i18n } = {}) {
             permissions: { contains: (p, cb) => setImmediate(() => cb(access.granted)) },
             alarms: {
                 create: (name, info) => { alarms[name] = info; },
-                get: (name, cb) => setImmediate(() => cb(typeof alarms[name] === 'object' ? alarms[name] : undefined)),
+                // The answer is the state when asked, like the browser: a create() sent after it doesn't change it
+                get: (name, cb) => { const found = typeof alarms[name] === 'object' ? alarms[name] : undefined; setImmediate(() => cb(found)); },
                 clear: (name, cb) => { delete alarms[name]; if (cb) setImmediate(() => cb(true)); },
                 onAlarm: { addListener(f) { alarms.fire = (name) => f({ name }); } },
             },
@@ -1823,18 +1825,75 @@ test('update: a base without folder id is tagged, and a local deletion is still 
     assert.deepStrictEqual(titles(state.remote.children), ['A']);
 });
 
-test('update: with duplicates, the folder synced by 1.7.0 is tagged, so the switch to the oldest is detected', async () => {
-    const { state, b, x, y } = await switchedFolders([bm('A'), bm('B')]); // x is found first by search
+test('update: with duplicates, a base without folder id is dropped rather than guessed', async () => {
+    // A duplicate arrived since the last 1.7.0 sync: the base describes X, but a search
+    // (creation order, as in Firefox) finds Y first. Tagging the base with Y would make
+    // the export delete A and B from the server.
+    const state = { remote: { title: 'root', children: [bm('A'), bm('B')] } };
+    const b = loadBackground(davServer(state));
+    const y = await b.addLocal('1', '🔄 Bookmark Sync');
+    const x = await b.addLocal('1', '🔄 Bookmark Sync');
+    b.bookmarks.nodes.get(y.id).dateAdded = 1000;
+    b.bookmarks.nodes.get(x.id).dateAdded = 2000;
     await b.addLocal(x.id, 'A', bm('A').url);
     await b.addLocal(x.id, 'B', bm('B').url);
     await b.addLocal(y.id, 'C', bm('C').url);
     b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A'), bm('B')] };
     await b.installed({ reason: 'update' });
-    assert.strictEqual(b.store.syncBase.folderId, x.id);
-    await b.call('pullBookmarksFromServer');
+    assert.strictEqual(b.store.syncBase, undefined);
+    const res = await b.call('pushBookmarksToServer');
+    assert.strictEqual(res.status, 'success', res.message);
+    assert.deepStrictEqual(titles(state.remote.children).sort(), ['A', 'B', 'C']);
+});
+
+test('update: the folder vanishing while the base is set does not fail', async () => {
+    const b = loadBackground(noLock);
+    const folder = await b.seed();
+    const getSubTree = b.bookmarks.getSubTree;
+    b.bookmarks.getSubTree = (id, cb) => { b.bookmarks.nodes.delete(id); return getSubTree(id, cb); };
+    delete b.store.syncBase;
+    await assert.doesNotReject(b.sandbox.seedSyncBaseAfterUpdate());
+    assert.strictEqual(b.store.syncBase, undefined);
+    assert.ok(folder);
+});
+
+test('folder: removing the synced folder exports the surviving duplicate instead of leaving it to the next import', async () => {
+    const { state, b, x, y } = await switchedFolders([bm('A'), bm('B')]); // y: oldest, synced
+    await b.addLocal(y.id, 'A', bm('A').url);
+    await b.addLocal(y.id, 'B', bm('B').url);
+    await b.addLocal(x.id, 'A', bm('A').url);
+    await b.addLocal(x.id, 'B', bm('B').url);
+    await b.addLocal(x.id, 'C', bm('C').url);
+    b.store.syncBase = { fileUrl: JSON_URL, folderId: y.id, children: [bm('A'), bm('B')] };
+    await b.sandbox.findSyncFolderId();
+    await new Promise(r => b.bookmarks.removeTree(y.id, r));
+    b.bookmarks.events.removed(y.id, { parentId: '1', node: { id: y.id, title: '🔄 Bookmark Sync' } });
     await b.flush();
-    assert.deepStrictEqual(b.titlesIn(y.id), ['A', 'B']);
-    assert.deepStrictEqual(titles(state.remote.children), ['A', 'B']);
+    const armed = b.timers.filter(t => t.ms === 5000);
+    assert.strictEqual(armed.length, 1, 'no export scheduled');
+    armed[0].fn();
+    await b.flush();
+    assert.deepStrictEqual(titles(state.remote.children).sort(), ['A', 'B', 'C']);
+    assert.deepStrictEqual(b.titlesIn(x.id), ['A', 'B', 'C']);
+});
+
+test('folder: removing the only sync folder schedules nothing', async () => {
+    const b = loadBackground(noLock);
+    const only = await b.addLocal('1', '🔄 Bookmark Sync');
+    await b.sandbox.findSyncFolderId();
+    await new Promise(r => b.bookmarks.removeTree(only.id, r));
+    b.bookmarks.events.removed(only.id, { parentId: '1', node: { id: only.id, title: '🔄 Bookmark Sync' } });
+    await b.flush();
+    assert.strictEqual(b.timers.filter(t => t.ms === 5000).length, 0);
+});
+
+test('popup: Test connection also saves the typed settings before the permission prompt', async () => {
+    const r = await popup('https://cloud.example/dav/', { click: false });
+    r.el('password').value = 'new-password';
+    r.el('password').listeners.input(); // debounced save pending
+    await r.el('testConnectionBtn').listeners.click();
+    const saved = r.order.indexOf('set password');
+    assert.ok(saved >= 0 && saved < r.order.indexOf('request'), `order: ${r.order}`);
 });
 
 test('folder switch: bookmark events follow the folder actually synced', async () => {

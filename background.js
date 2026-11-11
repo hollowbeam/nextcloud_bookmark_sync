@@ -1192,10 +1192,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 // Updating from a version without a sync base: the folder as it is now (in sync,
 // barring changes from the last few seconds) becomes the base, so deletions made
 // right after the update aren't undone by the next merge.
-// Updating from a version whose base has no folder id (1.7.0 or older): the base is
-// tagged with the folder those versions synced, the first one found by name. With
-// duplicates, the synced folder is now the oldest one: if it isn't that one, the
-// next sync reads the change and doesn't compare the other folder with this base.
+// Updating from a version whose base has no folder id (1.7.0 or older): with a single
+// folder, the base is tagged with it. With several, which one the base describes can't
+// be told (a duplicate may have arrived since the last sync), so the base is dropped:
+// the next import lets the server win and an export keeps both sides, nothing is
+// deleted from the server.
 async function seedSyncBaseAfterUpdate() {
     const { serverUrl, [SYNC_BASE_KEY]: saved } = await new Promise(resolve => chrome.storage.local.get(['serverUrl', SYNC_BASE_KEY], resolve));
     if (!serverUrl) return;
@@ -1204,20 +1205,26 @@ async function seedSyncBaseAfterUpdate() {
 
     const results = await new Promise(resolve => chrome.bookmarks.search({ title: SYNC_FOLDER_NAME }, resolve));
     if (saved && saved.fileUrl === fileUrl) {
-        const previous = (results || []).find(r => !r.url);
-        if (!saved.folderId && previous) await saveSyncBase(fileUrl, saved.children, previous.id);
+        if (saved.folderId) return;
+        const folders = (results || []).filter(r => !r.url && r.title === SYNC_FOLDER_NAME);
+        if (folders.length > 1) await new Promise(resolve => chrome.storage.local.remove(SYNC_BASE_KEY, resolve));
+        else if (folders.length === 1) await saveSyncBase(fileUrl, saved.children, folders[0].id);
         return;
     }
 
     const folder = pickSyncFolder(results);
     if (!folder) return;
     const local = normalizeNode(await getBookmarksTreeAsync(folder.id));
+    if (!local) return; // The folder vanished meanwhile: the next sync sets the base
     await saveSyncBase(fileUrl, withoutArchiveFolder(local.children), folder.id);
 }
 
 // The archive cleanup, and the automatic import unless automatic sync is paused.
 // firstRun: e.g. { delayInMinutes: 1 } to run them soon instead of after a full period.
+let alarmsScheduled = false; // Set at once: ensureAlarms must not override createAlarms
+
 function createAlarms(firstRun = {}) {
+    alarmsScheduled = true;
     chrome.alarms.create("dailyCleanup", { ...firstRun, periodInMinutes: 1440 });
     chrome.storage.local.get(['syncFrequency', 'autoSyncEnabled'], (result) => {
         if (result.autoSyncEnabled !== false) {
@@ -1236,7 +1243,9 @@ function ensureAlarms() {
     chrome.storage.local.get(['syncFrequency', 'autoSyncEnabled'], (result) => {
         const createIfMissing = (name, info) => chrome.alarms.get(name, (alarm) => {
             void chrome.runtime.lastError;
-            if (!alarm) chrome.alarms.create(name, info);
+            // The browser answers get() with the state before a create() sent after it:
+            // creating here could replace the alarm with a first run soon (startup, install)
+            if (!alarm && !alarmsScheduled) chrome.alarms.create(name, info);
         });
         createIfMissing("dailyCleanup", { periodInMinutes: 1440 });
         if (result.autoSyncEnabled !== false) {
@@ -1283,7 +1292,13 @@ if (chrome.bookmarks.onRemoved) {
         // A sync folder removed (e.g. a duplicate): searched again, which also
         // updates the duplicate count shown in the popup
         const node = removeInfo && removeInfo.node;
-        if (node && !node.url && node.title === SYNC_FOLDER_NAME) cachedSyncFolderId = null;
+        if (node && !node.url && node.title === SYNC_FOLDER_NAME) {
+            cachedSyncFolderId = null;
+            // The synced folder may be the one removed: the surviving one is exported
+            // (both sides kept), not overwritten by the next import. With none left,
+            // nothing is scheduled: the folder isn't recreated right after its removal.
+            findSyncFolderId().then(survivor => { if (survivor) onBookmarkEvent(survivor); });
+        }
         onBookmarkEvent(removeInfo && removeInfo.parentId);
     });
 }
