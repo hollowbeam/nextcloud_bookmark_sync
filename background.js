@@ -1227,6 +1227,25 @@ function createAlarms(firstRun = {}) {
     });
 }
 
+// Every time the service worker starts: creates the alarms that are missing, and only
+// those (an existing one keeps its schedule). Chrome recommends it, since alarms of
+// versions before Chrome 150 can be lost unpredictably; Firefox drops them at restart.
+// The frequency and the pause are read from the storage, where the popup saves them
+// before telling us, so this can't bring back an old value.
+function ensureAlarms() {
+    chrome.storage.local.get(['syncFrequency', 'autoSyncEnabled'], (result) => {
+        const createIfMissing = (name, info) => chrome.alarms.get(name, (alarm) => {
+            void chrome.runtime.lastError;
+            if (!alarm) chrome.alarms.create(name, info);
+        });
+        createIfMissing("dailyCleanup", { periodInMinutes: 1440 });
+        if (result.autoSyncEnabled !== false) {
+            createIfMissing("autoPullAlarm", { periodInMinutes: parseInt(result.syncFrequency) || 15 });
+        }
+    });
+}
+ensureAlarms();
+
 chrome.runtime.onInstalled.addListener((details) => {
     if (details && details.reason === 'update') seedSyncBaseAfterUpdate();
     // With a first run soon too: a browser or extension update applied at startup

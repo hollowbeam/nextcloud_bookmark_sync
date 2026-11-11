@@ -133,6 +133,7 @@ function loadBackground(server, { locale = i18n } = {}) {
             permissions: { contains: (p, cb) => setImmediate(() => cb(access.granted)) },
             alarms: {
                 create: (name, info) => { alarms[name] = info; },
+                get: (name, cb) => setImmediate(() => cb(typeof alarms[name] === 'object' ? alarms[name] : undefined)),
                 clear: (name, cb) => { delete alarms[name]; if (cb) setImmediate(() => cb(true)); },
                 onAlarm: { addListener(f) { alarms.fire = (name) => f({ name }); } },
             },
@@ -1612,6 +1613,28 @@ test('startup: no automatic import while automatic sync is paused', async () => 
     await b.flush();
     assert.strictEqual(b.alarms.autoPullAlarm, undefined);
     assert.ok(b.alarms.dailyCleanup);
+});
+
+test('service worker start: missing alarms are created, with the saved frequency', async () => {
+    const b = loadBackground(noLock);
+    b.store.syncFrequency = '30';
+    await b.flush();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(b.alarms.autoPullAlarm)), { periodInMinutes: 30 });
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(b.alarms.dailyCleanup)), { periodInMinutes: 1440 });
+});
+
+test('service worker start: an alarm that exists keeps its schedule, and a paused sync gets none', async () => {
+    const b = loadBackground(noLock);
+    b.alarms.dailyCleanup = { delayInMinutes: 7, periodInMinutes: 1440 };
+    b.store.autoSyncEnabled = false;
+    await b.flush();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(b.alarms.dailyCleanup)), { delayInMinutes: 7, periodInMinutes: 1440 });
+    assert.strictEqual(b.alarms.autoPullAlarm, undefined);
+    b.store.autoSyncEnabled = true;
+    b.alarms.autoPullAlarm = { periodInMinutes: 5 };
+    b.sandbox.ensureAlarms();
+    await b.flush();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(b.alarms.autoPullAlarm)), { periodInMinutes: 5 });
 });
 
 test('status: no access before any sync is not flagged on the icon, but it is afterwards', async () => {
