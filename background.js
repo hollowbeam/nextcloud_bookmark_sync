@@ -246,26 +246,9 @@ async function getBookmarksTreeAsync(folderId) {
 // ==========================================
 
 // Get or Create the main Sync Folder (Cross-browser safe)
-// The folder chosen in the settings, if it still exists (null otherwise)
-async function getChosenSyncFolderId() {
-    const { syncFolderId } = await new Promise(resolve => chrome.storage.local.get(['syncFolderId'], resolve));
-    if (!syncFolderId) return null;
-    const nodes = await new Promise(resolve => chrome.bookmarks.get(syncFolderId, (result) => {
-        void chrome.runtime.lastError; // Deleted meanwhile
-        resolve(result);
-    }));
-    if (nodes && nodes[0] && !nodes[0].url) return syncFolderId;
-    // Deleted: back to the default folder, rather than syncing nothing
-    chrome.storage.local.remove('syncFolderId');
-    return null;
-}
-
 // Returns { id, created }. created: the folder didn't exist (first use, or the user
 // deleted or renamed it). Its emptiness then says nothing about what to delete.
 async function getOrCreateSyncFolder() {
-    const chosenId = await getChosenSyncFolderId();
-    if (chosenId) return { id: chosenId, created: false };
-
     return new Promise((resolve) => {
         chrome.bookmarks.search({ title: SYNC_FOLDER_NAME }, (results) => {
             const folder = results.find(r => !r.url);
@@ -446,19 +429,16 @@ function withoutSkipped(nodes, skipped) {
         .map(node => node.url ? node : { title: node.title, children: withoutSkipped(node.children, skipped) });
 }
 
-// The base is tied to the remote file and to the synced folder: after a change of
-// server or folder, it would wrongly read as deletions. (Bases saved by 1.6.0 have
-// no folderId: they belong to the default folder.)
-function loadSyncBase(fileUrl, folderId) {
+// The base is tied to the remote file: after a server change it would wrongly read as deletions
+function loadSyncBase(fileUrl) {
     return new Promise(resolve => chrome.storage.local.get([SYNC_BASE_KEY], (result) => {
         const saved = result[SYNC_BASE_KEY];
-        const sameFolder = saved && (saved.folderId === undefined || saved.folderId === folderId);
-        resolve(saved && saved.fileUrl === fileUrl && sameFolder ? saved.children : null);
+        resolve(saved && saved.fileUrl === fileUrl ? saved.children : null);
     }));
 }
 
-function saveSyncBase(fileUrl, children, folderId) {
-    return new Promise(resolve => chrome.storage.local.set({ [SYNC_BASE_KEY]: { fileUrl, children, folderId } }, resolve));
+function saveSyncBase(fileUrl, children) {
+    return new Promise(resolve => chrome.storage.local.set({ [SYNC_BASE_KEY]: { fileUrl, children } }, resolve));
 }
 
 // Compression proxies rewrite the ETag of the response they compress (nginx makes
@@ -663,7 +643,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             noteRemoteFormat(remote);
             // A recreated folder is empty because it was deleted or renamed, not because
             // the user deleted every bookmark: without a base, the merge restores them
-            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl, syncFolderId);
+            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl);
 
             // Another device exported since our last sync: merge its changes instead
             // of overwriting them. Without a base (fresh install, new server) both
@@ -680,14 +660,14 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
                 }
                 // The merge is applied locally: if the upload fails, the remote we read
                 // is the base, so its items aren't mistaken for local additions next time
-                await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped), syncFolderId);
+                await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped));
             }
 
             // Nothing new for the server: no upload, so no new ETag for other devices
             // to download, and less contention on the file. A file from an old-version
             // device is still rewritten, so it no longer reads as one.
             if (remote.tree && !remote.legacy && sameTree(uploadChildren, remote.tree.children)) {
-                await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped), syncFolderId);
+                await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped));
                 return sendResponse({ status: "success", message: syncSummary(counts, false) });
             }
 
@@ -723,7 +703,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             if (response.status === 423) throw new SyncError(BUSY_MESSAGE, { locked: true });
             if (!response.ok) throw new SyncError(describeHttpStatus(response.status));
 
-            await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped), syncFolderId);
+            await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped));
             chrome.storage.local.set({ newFormatSeen: true });
 
             console.log("🚀 Sync successful!");
@@ -789,20 +769,21 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             // deleted on the other side since our last sync goes to the archive
             const local = normalizeNode(await getBookmarksTreeAsync(syncFolderId));
             local.children = withoutArchiveFolder(local.children);
-            // Without a base (first sync, new server or folder, or a folder deleted and
-            // recreated) both sides are kept: nothing is archived, a deleted folder is
-            // restored, and a newly chosen folder keeps its bookmarks. Devices updated
-            // from 1.5.1 or older got a base at update time, so their deletions hold.
-            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl, syncFolderId);
-            const target = mergeChildren(savedBase, local.children, remote.tree.children);
+            // Without a base (first import, a new server, or a folder deleted or renamed
+            // and recreated empty) the server wins: the folder is restored from it, and a
+            // stale folder (e.g. brought back by the browser's own sync) doesn't bring
+            // back what other devices deleted
+            const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl);
+            const target = mergeChildren(savedBase || local.children, local.children, remote.tree.children);
 
             const { counts, skipped } = await applyTreeToLocal(syncFolderId, target);
-            await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped), syncFolderId);
-
-            sendResponse({ status: "success", message: syncSummary(counts, false) });
+            await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped));
 
             // Kept local changes still have to reach the server
             exportNeeded = !sameTree(target, remote.tree.children) || remote.legacy;
+            const nothingApplied = !counts.added && !counts.archived && !counts.renamed && !counts.skipped;
+            const message = nothingApplied && exportNeeded ? t('localChangesPending') : syncSummary(counts, false);
+            sendResponse({ status: "success", message });
 
         } catch (error) {
             console.error("PULL Error:", error);
@@ -897,8 +878,6 @@ let cachedSyncFolderId = null;
 let syncFolderSearch = null; // In flight, shared by events arriving together
 
 async function findSyncFolderId() {
-    const chosenId = await getChosenSyncFolderId();
-    if (chosenId) return chosenId;
     if (cachedSyncFolderId) {
         const nodes = await new Promise(resolve => chrome.bookmarks.get(cachedSyncFolderId, (result) => {
             void chrome.runtime.lastError; // Removed meanwhile
@@ -1145,7 +1124,7 @@ async function seedSyncBaseAfterUpdate() {
     if (!folder) return;
 
     const local = normalizeNode(await getBookmarksTreeAsync(folder.id));
-    await saveSyncBase(fileUrl, withoutArchiveFolder(local.children), folder.id);
+    await saveSyncBase(fileUrl, withoutArchiveFolder(local.children));
 }
 
 chrome.runtime.onInstalled.addListener((details) => {

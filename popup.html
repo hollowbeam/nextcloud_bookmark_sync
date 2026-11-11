@@ -14,8 +14,8 @@
             --label: #555555;
             --border: #cccccc;
             --divider: #e6e6e6;
-            --accent: #0082c9;
-            --accent-hover: #006da8;
+            --accent: #0071ae;
+            --accent-hover: #005e91;
             --accent-soft: #eaf4fb;
             --accent-border: #b6dcf2;
             --ok: #1e8449;
@@ -24,8 +24,8 @@
             --warn-bg: #fff4e0;
             --warn-border: #f0c987;
             --track: #e0e0e0;
-            --button-bg: #0082c9;
-            --button-hover: #006da8;
+            --button-bg: #0071ae;
+            --button-hover: #005e91;
         }
         @media (prefers-color-scheme: dark) {
             :root {
@@ -119,9 +119,6 @@
         .result.ok { color: var(--ok); }
         .result.error { color: var(--error); }
         .result.busy { color: var(--muted); }
-        .confirm-box { margin-top: 6px; }
-        .confirm-box .buttons { display: flex; gap: 6px; }
-        .confirm-box .secondary-btn { margin-top: 6px; }
         details { margin-top: 16px; border-top: 1px solid var(--divider); padding-top: 10px; }
         summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--label); }
         .save-indicator { font-size: 11px; color: var(--ok); text-align: right; height: 14px; margin-top: 4px; opacity: 0; transition: opacity 0.3s; }
@@ -170,7 +167,7 @@
         <div class="auto-row">
             <label>
                 <span data-i18n="autoSync">Automatic sync</span>
-                <span id="autoSyncState" class="auto-state"></span>
+                <span id="autoSyncState" class="auto-state" aria-hidden="true"></span>
                 <input type="checkbox" id="autoSyncEnabled">
             </label>
         </div>
@@ -199,19 +196,6 @@
         <button id="testConnectionBtn" class="secondary-btn" data-i18n="testConnection">Test connection</button>
         <div id="testResult" class="result" role="status" aria-live="polite"></div>
         <p class="hint"><a href="https://github.com/hollowbeam/nextcloud_bookmark_sync#setup-guide" target="_blank" rel="noopener" data-i18n="setupHelp">Setup help</a></p>
-
-        <label for="syncFolder" data-i18n="syncedFolderLabel">Folder to sync</label>
-        <select id="syncFolder">
-            <option value="" data-i18n="defaultFolderOption">🔄 Bookmark Sync (default)</option>
-        </select>
-        <p class="hint" data-i18n="syncedFolderHint"></p>
-        <div id="folderConfirm" class="confirm-box warning" hidden>
-            <span data-i18n="folderChangeWarning"></span>
-            <div class="buttons">
-                <button id="confirmFolder" class="secondary-btn" data-i18n="confirmFolderChange">Use this folder</button>
-                <button id="cancelFolder" class="secondary-btn" data-i18n="cancel">Cancel</button>
-            </div>
-        </div>
 
         <label for="syncFrequency" data-i18n="frequencyLabel">Automatic sync frequency</label>
         <select id="syncFrequency">

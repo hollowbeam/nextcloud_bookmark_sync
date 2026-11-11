@@ -717,14 +717,22 @@ test('pull: an invalid remote file is reported, nothing changes locally', async 
     assert.deepStrictEqual(b.titlesIn(id), ['A']);
 });
 
-test('pull: without a base both sides are kept, nothing is archived', async () => {
+test('pull: without a base the server wins (no resurrection of remote deletions)', async () => {
     const state = { remote: { title: 'root', children: [bm('A'), bm('R')] } };
     const { b, id } = await deviceWith(state, null, [bm('A'), bm('X')]);
     const res = await b.call('pullBookmarksFromServer');
     await b.flush();
-    assert.strictEqual(res.message, '1 added.');
-    assert.deepStrictEqual(b.titlesIn(id), ['A', 'R', 'X']);
-    assert.ok(b.timers.some(t => t.ms === 5000), 'X not scheduled for export');
+    assert.strictEqual(res.message, '1 added, 1 archived.');
+    assert.deepStrictEqual(b.titlesIn(id), ['A', 'R']);
+    assert.ok(!b.timers.some(t => t.ms === 5000), 'X would be pushed back');
+});
+
+test('pull: says when local changes are still to be sent', async () => {
+    const state = { remote: { title: 'root', children: [bm('A')] } };
+    const { b } = await deviceWith(state, [bm('A')], [bm('A'), bm('L')]);
+    const res = await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual(res.message, 'Local changes not sent yet: they will be sent with the next sync.');
 });
 
 test('pull: a local reorder survives when the remote order is unchanged', async () => {
@@ -1144,81 +1152,20 @@ test('translations: English and French have the same keys and placeholders', () 
     }
 });
 
-test('folder: a chosen folder is synced instead of the default one', async () => {
-    const state = { remote: null };
-    const b = loadBackground(davServer(state));
-    await b.seed(); // the default folder exists but isn't chosen
-    const work = await b.addLocal('1', 'Work');
-    await b.addLocal(work.id, 'W', 'https://w.example/');
-    b.store.syncFolderId = work.id;
-    const res = await b.call('pushBookmarksToServer');
-    assert.strictEqual(res.status, 'success', res.message);
-    assert.deepStrictEqual(titles(state.remote.children), ['W']);
-});
-
-test('folder: a newly chosen folder keeps its bookmarks and gets the server ones', async () => {
-    const state = { remote: { title: 'root', children: [bm('A'), bm('B')] } };
-    const b = loadBackground(davServer(state));
-    const syncId = await b.seed();
-    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A'), bm('B')], folderId: syncId };
-    const work = await b.addLocal('1', 'Work');
-    await b.addLocal(work.id, 'W', 'https://w.example/');
-    b.store.syncFolderId = work.id;
-    // With the old folder's base, W would be "added" and A, B... fine, but a base
-    // from another folder must never read as deletions: the union is expected
-    const res = await b.call('pullBookmarksFromServer');
-    await b.flush();
-    assert.strictEqual(res.status, 'success', res.message);
-    assert.deepStrictEqual(b.titlesIn(work.id).sort(), ['A', 'B', 'W']);
-    assert.ok(!b.bookmarks.nodes.get('1').children.some(id => b.bookmarks.nodes.get(id).title === '🗑️ Bookmark Archives'), 'something was archived');
-});
-
-test('folder: a base saved for the default folder is not used for a chosen one', async () => {
-    const b = loadBackground(noLock);
-    const syncId = await b.seed();
-    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A')], folderId: syncId };
-    assert.strictEqual(await b.sandbox.loadSyncBase(JSON_URL, 'other-folder'), null);
-    assert.ok(await b.sandbox.loadSyncBase(JSON_URL, syncId));
-    // A base saved by 1.6.0 (no folderId) belongs to whatever folder is synced
-    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A')] };
-    assert.ok(await b.sandbox.loadSyncBase(JSON_URL, syncId));
-});
-
-test('folder: a chosen folder that was deleted falls back to the default one', async () => {
-    const b = loadBackground(noLock);
-    b.store.syncFolderId = 'gone';
-    const folder = await b.sandbox.getOrCreateSyncFolder();
-    assert.strictEqual(b.bookmarks.nodes.get(folder.id).title, '🔄 Bookmark Sync');
-    assert.strictEqual(b.store.syncFolderId, undefined);
-});
-
-test('archive: the archive folder inside a synced folder is never synced or archived', async () => {
+test('archive: an archive folder moved into the sync folder is never synced or archived', async () => {
     const state = { remote: { title: 'root', children: [bm('A')] } };
     const b = loadBackground(davServer(state));
-    // The bookmarks bar itself is synced, and holds the archive folder
-    const archive = await b.addLocal('1', '🗑️ Bookmark Archives');
+    const syncId = await b.seed();
+    const archive = await b.addLocal(syncId, '🗑️ Bookmark Archives');
     await b.addLocal(archive.id, 'Old', 'https://old.example/');
-    await b.addLocal('1', 'A', bm('A').url);
-    await b.addLocal('1', 'L', bm('L').url);
-    b.store.syncFolderId = '1';
-    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A')], folderId: '1' };
+    await b.addLocal(syncId, 'A', bm('A').url);
+    await b.addLocal(syncId, 'L', bm('L').url);
+    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A')] };
     const res = await b.call('pushBookmarksToServer');
     await b.flush();
     assert.strictEqual(res.status, 'success', res.message);
     assert.deepStrictEqual(titles(state.remote.children), ['A', 'L']);
-    assert.ok(b.bookmarks.nodes.get('1').children.includes(archive.id), 'archive folder moved or archived');
-});
-
-test('archive: a top-level synced folder still gets an archive (browser default place)', async () => {
-    const state = { remote: { title: 'root', children: [] } };
-    const b = loadBackground(davServer(state));
-    await b.addLocal('1', 'X', 'https://x.example/');
-    b.store.syncFolderId = '1';
-    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('X', 'https://x.example/')], folderId: '1' };
-    const res = await b.call('pullBookmarksFromServer');
-    await b.flush();
-    assert.strictEqual(res.status, 'success', res.message);
-    assert.strictEqual(res.message, '1 archived.');
+    assert.ok(b.bookmarks.nodes.get(syncId).children.includes(archive.id), 'archive folder moved or archived');
 });
 
 // ------------------------------------------------------------------
@@ -1324,8 +1271,9 @@ test('popup: the last sync result is shown, failures with their reason', async (
     assert.strictEqual(failed.lastSync, 'Last sync failed (just now): Wrong username or app password.');
     const ok = await popup('', { stored: { lastSync: { kind: 'sync', ok: true, message: 'Up to date.', time: Date.now() - 5 * 60000 } } });
     assert.strictEqual(ok.lastSync, '✓ Synced 5 minutes ago');
+    // The periodic background import reads as a sync too
     const imported = await popup('', { stored: { lastSync: { kind: 'import', ok: true, message: '1 added.', time: Date.now() - 2 * 3600000 } } });
-    assert.strictEqual(imported.lastSync, '✓ Imported 2 hours ago');
+    assert.strictEqual(imported.lastSync, '✓ Synced 2 hours ago');
 });
 
 test('popup: test connection sends the typed values, not the saved ones', async () => {
@@ -1452,34 +1400,3 @@ test('popup: the automatic sync state reads On or Paused', async () => {
     assert.strictEqual(paused.el('autoSyncState').textContent, 'Paused');
 });
 
-test('popup: changing the synced folder asks first, then saves it', async () => {
-    const tree = [{ id: '0', children: [{ id: '1', parentId: '0', title: 'Bookmarks bar', children: [
-        { id: '7', parentId: '1', title: 'Work', children: [] },
-        { id: '8', parentId: '1', title: '🔄 Bookmark Sync', children: [] },
-    ] }] }];
-    const r = await popup('', { click: false, tree });
-    const select = r.el('syncFolder');
-    select.value = '7';
-    select.listeners.change();
-    assert.strictEqual(r.el('folderConfirm').hidden, false, 'no confirmation asked');
-    assert.deepStrictEqual(r.writes.filter(w => 'syncFolderId' in w), []);
-    r.el('confirmFolder').listeners.click();
-    assert.deepStrictEqual(JSON.parse(JSON.stringify(r.writes.filter(w => 'syncFolderId' in w))), [{ syncFolderId: '7' }]);
-    // Back to the default folder: the setting is removed
-    select.value = '';
-    select.listeners.change();
-    r.el('confirmFolder').listeners.click();
-    assert.deepStrictEqual(r.removed, ['syncFolderId']);
-});
-
-test('popup: cancelling a folder change keeps the current folder', async () => {
-    const tree = [{ id: '0', children: [{ id: '1', parentId: '0', title: 'Bookmarks bar', children: [] }] }];
-    const r = await popup('', { click: false, tree });
-    const select = r.el('syncFolder');
-    select.value = '1';
-    select.listeners.change();
-    r.el('cancelFolder').listeners.click();
-    assert.strictEqual(select.value, '');
-    assert.strictEqual(r.el('folderConfirm').hidden, true);
-    assert.deepStrictEqual(r.writes.filter(w => 'syncFolderId' in w), []);
-});

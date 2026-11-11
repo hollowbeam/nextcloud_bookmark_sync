@@ -21,8 +21,6 @@
 // UTILITY FUNCTIONS
 // ==========================================
 
-const SYNC_FOLDER_NAME = "🔄 Bookmark Sync";
-const ARCHIVE_FOLDER_NAME = "🗑️ Bookmark Archives";
 const LEGACY_WARNING_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Text in the browser's language (_locales/), the key itself when missing
@@ -31,8 +29,10 @@ function t(key, ...substitutions) {
     return text || key;
 }
 
+// The language of the messages actually shown (a browser in German gets English
+// messages: dates must be in English too)
 function uiLanguage() {
-    return (chrome.i18n && chrome.i18n.getUILanguage && chrome.i18n.getUILanguage()) || 'en';
+    return t('locale') === 'locale' ? 'en' : t('locale');
 }
 
 // Fills the elements marked data-i18n (text), data-i18n-placeholder and data-i18n-title
@@ -127,7 +127,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const when = relativeTime(lastSync.time);
         line.classList.toggle('failed', !lastSync.ok);
         line.textContent = lastSync.ok
-            ? t(lastSync.kind === 'import' ? 'lastImportOk' : 'lastSyncOk', when)
+            ? t('lastSyncOk', when)
             : t('lastSyncFailed', when, lastSync.message);
     }
     // Keeps "3 minutes ago" true while the popup stays open
@@ -311,56 +311,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
 
-    // 8. Folder to sync: the default "🔄 Bookmark Sync", or one the user picks
-    const folderSelect = $('syncFolder');
-    let savedFolderId = '';
-
-    // Every bookmark folder, indented by depth; not the roots, the default sync
-    // folder (the first option) or the archive
-    function addFolderOptions(nodes, depth) {
-        for (const node of nodes) {
-            if (node.url) continue;
-            if (node.title === ARCHIVE_FOLDER_NAME) continue;
-            if (node.parentId && node.title !== SYNC_FOLDER_NAME) {
-                const option = document.createElement('option');
-                option.value = node.id;
-                option.textContent = `${'   '.repeat(depth)}${node.title || '…'}`;
-                folderSelect.appendChild(option);
-            }
-            if (node.children) addFolderOptions(node.children, node.parentId ? depth + 1 : depth);
-        }
-    }
-
-    if (chrome.bookmarks && chrome.bookmarks.getTree) {
-        chrome.bookmarks.getTree((tree) => {
-            addFolderOptions(tree || [], 0);
-            chrome.storage.local.get(['syncFolderId'], (result) => {
-                savedFolderId = result.syncFolderId || '';
-                folderSelect.value = savedFolderId;
-                // The chosen folder may have been deleted since
-                if (folderSelect.value !== savedFolderId) folderSelect.value = '';
-            });
-        });
-    }
-
-    // A change of folder merges its bookmarks with the server's: confirmed first
-    folderSelect.addEventListener('change', () => {
-        $('folderConfirm').hidden = folderSelect.value === savedFolderId;
-    });
-    $('cancelFolder').addEventListener('click', () => {
-        folderSelect.value = savedFolderId;
-        $('folderConfirm').hidden = true;
-    });
-    $('confirmFolder').addEventListener('click', () => {
-        savedFolderId = folderSelect.value;
-        $('folderConfirm').hidden = true;
-        const done = () => flashSaved();
-        if (savedFolderId) chrome.storage.local.set({ syncFolderId: savedFolderId }, done);
-        else chrome.storage.local.remove('syncFolderId', done);
-    });
-
-
-    // 9. Sync now (main screen) and Import only (advanced settings)
+    // 8. Sync now (main screen) and Import only (advanced settings)
     let statusClearTimer = null;
 
     async function runAction(action, resultEl, busyText, button) {
