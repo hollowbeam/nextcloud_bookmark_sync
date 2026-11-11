@@ -223,13 +223,24 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function persistField(id) {
         const value = $(id).value.trim();
-        chrome.storage.local.set({ [id]: value }, () => {
+        return new Promise(resolve => chrome.storage.local.set({ [id]: value }, () => {
             flashSaved();
             // The frequency drives the background alarm
             if (id === 'syncFrequency') {
                 chrome.runtime.sendMessage({ action: "update_alarm", frequency: parseInt(value, 10) });
             }
-        });
+            resolve();
+        }));
+    }
+
+    // Saves the fields still waiting for their debounce: a sync started right after
+    // typing must use the new values, which the background reads from storage
+    function flushPendingSaves() {
+        return Promise.all(inputs.filter(id => saveTimeouts[id]).map(id => {
+            clearTimeout(saveTimeouts[id]);
+            saveTimeouts[id] = null;
+            return persistField(id);
+        }));
     }
 
     inputs.forEach(id => {
@@ -240,15 +251,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     // The popup can close at any moment: a pending save is flushed when it loses focus
-    window.addEventListener('blur', () => {
-        inputs.forEach(id => {
-            if (saveTimeouts[id]) {
-                clearTimeout(saveTimeouts[id]);
-                saveTimeouts[id] = null;
-                persistField(id);
-            }
-        });
-    });
+    window.addEventListener('blur', () => { flushPendingSaves(); });
 
     // App passwords are long and pasted: showing them helps spot a stray character
     $('togglePassword').addEventListener('click', () => {
@@ -328,6 +331,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         show(resultEl, busyText, 'busy');
         button.disabled = true;
+        await flushPendingSaves();
         chrome.runtime.sendMessage({ action }, (reply) => {
             const response = backgroundResponse(reply);
             button.disabled = false;

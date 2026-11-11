@@ -81,7 +81,7 @@ function makeBookmarks(runtime) {
 }
 
 function loadBackground(server, { locale = i18n } = {}) {
-    const runtime = { lastError: undefined, onMessage: { addListener() {} }, onInstalled: { addListener(f) { runtime.installed = f; } } };
+    const runtime = { lastError: undefined, onMessage: { addListener(f) { runtime.message = f; } }, onInstalled: { addListener(f) { runtime.installed = f; } } };
     const bookmarks = makeBookmarks(runtime);
     const timers = [];
     const log = [];
@@ -118,7 +118,7 @@ function loadBackground(server, { locale = i18n } = {}) {
             permissions: { contains: (p, cb) => setImmediate(() => cb(access.granted)) },
             alarms: {
                 create: (name, info) => { alarms[name] = info; },
-                clear: (name) => { delete alarms[name]; },
+                clear: (name, cb) => { delete alarms[name]; if (cb) setImmediate(() => cb(true)); },
                 onAlarm: { addListener(f) { alarms.fire = (name) => f({ name }); } },
             },
             action: {
@@ -1177,13 +1177,15 @@ test('archive: an archive folder moved into the sync folder is never synced or a
 async function popup(serverUrl, { button = 'syncBtn', fields = {}, response = { status: 'success', message: 'ok' }, stored = {}, tree = null, click = true } = {}) {
     const writes = [];
     const removed = [];
+    const order = [];
+    let timerIds = 0;
     const els = new Map();
     const el = (id) => {
         if (!els.has(id)) {
             const listeners = {};
             els.set(id, new Proxy({ id, value: '', textContent: '', className: '', style: {}, listeners,
                 classList: { toggle() {}, add() {}, remove() {} },
-                addEventListener: (t, f) => { listeners[t] = f; } }, {
+                addEventListener: (t, f) => { const prev = listeners[t]; listeners[t] = prev ? (...a) => { prev(...a); return f(...a); } : f; } }, {
                 get: (o, k) => (k in o ? o[k] : (typeof k === 'string' ? () => undefined : undefined)),
                 set: (o, k, v) => { o[k] = v; return true; },
             }));
@@ -1197,13 +1199,13 @@ async function popup(serverUrl, { button = 'syncBtn', fields = {}, response = { 
     const sandbox = {
         document: { getElementById: el, documentElement: {}, createElement: () => ({}), addEventListener: (t, f) => { if (t === 'DOMContentLoaded') ready = f; }, querySelectorAll: () => [], querySelector: () => el('q') },
         window: { addEventListener() {} }, navigator: { userAgent: 'test', brave: undefined },
-        console: { log() {}, warn() {}, error() {} }, setTimeout: () => 0, clearTimeout() {}, URL, Math, parseInt, Promise, Date, Boolean, Intl, Number, String,
+        console: { log() {}, warn() {}, error() {} }, setTimeout: () => ++timerIds, clearTimeout() {}, URL, Math, parseInt, Promise, Date, Boolean, Intl, Number, String,
         chrome: {
             i18n,
             storage: {
                 local: {
                     get: (k, cb) => cb({ ...stored }),
-                    set: (o, cb) => { writes.push(o); if (cb) cb(); },
+                    set: (o, cb) => { writes.push(o); order.push('set ' + Object.keys(o).join()); if (cb) cb(); },
                     remove: (k, cb) => { removed.push(k); if (cb) cb(); },
                 },
                 onChanged: { addListener() {} },
@@ -1211,7 +1213,7 @@ async function popup(serverUrl, { button = 'syncBtn', fields = {}, response = { 
             bookmarks: tree ? { getTree: (cb) => cb(tree) } : undefined,
             permissions: { request: (p, cb) => { requests.push(p.origins[0]); cb(true); } },
             runtime: {
-                sendMessage: (m, cb) => { sent.push(m.action); messages.push(m); if (cb) cb(response); },
+                sendMessage: (m, cb) => { sent.push(m.action); messages.push(m); order.push('send ' + m.action); if (cb) cb(response); },
                 getManifest: () => ({ version: '9.8.7' }),
             },
         },
@@ -1230,7 +1232,7 @@ async function popup(serverUrl, { button = 'syncBtn', fields = {}, response = { 
         setupHidden: el('setupCard').hidden,
         lastSync: el('lastSync').textContent,
         legacyHidden: el('legacyWarning').hidden,
-        writes, removed, sandbox,
+        writes, removed, sandbox, order,
         version: el('version').textContent,
         el,
     };
@@ -1422,4 +1424,73 @@ test('folder: a recreated folder is still restored when the first sync after it 
         const folder = [...b.bookmarks.nodes.values()].find(n => n.title === '🔄 Bookmark Sync');
         assert.deepStrictEqual(b.titlesIn(folder.id), ['A', 'B'], `${action}: folder not restored`);
     }
+});
+
+// ------------------------------------------------------------------
+// Second-opinion review (Gemini 4 Argon) of 1.7.0
+// ------------------------------------------------------------------
+
+test('sync: a bookmark added while a sync applies changes is kept, not archived', async () => {
+    const state = { remote: { title: 'root', children: [bm('A')] } };
+    const b = loadBackground(davServer(state));
+    const syncId = await b.seed();
+    await b.addLocal(syncId, 'A', bm('A').url);
+    await b.addLocal(syncId, 'B', bm('B').url);
+    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A'), bm('B')] };
+    // The user adds U right after the sync took its snapshot of the folder
+    const getSubTree = b.bookmarks.getSubTree;
+    b.bookmarks.getSubTree = (id, cb) => getSubTree(id, (tree) => {
+        cb(tree);
+        const nodes = b.bookmarks.nodes;
+        nodes.set('user-added', { id: 'user-added', parentId: syncId, title: 'U', url: 'https://u.example/' });
+        nodes.get(syncId).children.push('user-added');
+    });
+    const res = await b.call('pullBookmarksFromServer'); // B was deleted elsewhere
+    await b.flush();
+    assert.strictEqual(res.message, '1 archived.');
+    assert.deepStrictEqual(b.titlesIn(syncId).sort(), ['A', 'U']);
+});
+
+test('auto-push: changes inside an archive folder within the sync folder schedule nothing', async () => {
+    const b = loadBackground(noLock);
+    const syncId = await b.seed();
+    const archive = await b.addLocal(syncId, '🗑️ Bookmark Archives');
+    const day = await b.addLocal(archive.id, '2026-11-11');
+    b.bookmarks.events.removed('old', { parentId: day.id });
+    b.bookmarks.events.created('x', { parentId: archive.id });
+    await b.flush();
+    assert.strictEqual(b.timers.filter(t => t.ms === 5000).length, 0);
+});
+
+test('alarm: changing the frequency while automatic sync is paused creates no alarm', async () => {
+    const b = loadBackground(noLock);
+    b.store.autoSyncEnabled = false;
+    b.alarms.autoPullAlarm = { periodInMinutes: 15 };
+    b.sandbox.chrome.runtime.message({ action: 'update_alarm', frequency: 5 }, {}, () => {});
+    await b.flush();
+    assert.strictEqual(b.alarms.autoPullAlarm, undefined);
+    b.store.autoSyncEnabled = true;
+    b.sandbox.chrome.runtime.message({ action: 'update_alarm', frequency: 5 }, {}, () => {});
+    await b.flush();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(b.alarms.autoPullAlarm)), { periodInMinutes: 5 });
+});
+
+test('connection test: a proxy rewriting the folder path does not read as a file URL', async () => {
+    // The hrefs carry a prefix the proxy adds, so none equals the URL's path; a file comes first
+    const body = '<d:multistatus>'
+        + '<d:response><d:href>/nextcloud/dav/bookmarks_sync.json</d:href><d:propstat><d:prop><d:resourcetype/></d:prop></d:propstat></d:response>'
+        + '<d:response><d:href>/nextcloud/dav/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>'
+        + '</d:multistatus>';
+    const r = await testConnection(propfind(207, body));
+    assert.deepStrictEqual([r.status, r.message], ['success', 'Connected. Bookmarks file found on the server.']);
+});
+
+test('popup: a sync right after typing a setting uses the new value', async () => {
+    const r = await popup('https://cloud.example/dav/', { click: false });
+    r.el('password').value = 'new-password';
+    r.el('password').listeners.input(); // debounced save pending
+    await r.el('syncBtn').listeners.click();
+    const saved = r.order.indexOf('set password');
+    assert.ok(saved >= 0, 'pending save not flushed');
+    assert.ok(saved < r.order.indexOf('send sync_now'), `order: ${r.order}`);
 });

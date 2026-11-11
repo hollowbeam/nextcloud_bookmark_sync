@@ -500,7 +500,17 @@ function noteRemoteFormat(remote) {
 
 // Makes the local sync folder match targetNodes: creates what is missing, updates
 // titles, archives what is no longer there, then reorders.
-async function applyTreeToLocal(syncFolderId, targetNodes) {
+// Ids of every node of a raw bookmark tree
+function collectIds(node, ids = new Set()) {
+    ids.add(node.id);
+    (node.children || []).forEach(child => collectIds(child, ids));
+    return ids;
+}
+
+// knownIds: the nodes the merge was computed from. A bookmark the user adds while
+// the sync runs isn't in the target, but it isn't a deletion either: it is left in
+// place (and sent by the sync that follows), never archived.
+async function applyTreeToLocal(syncFolderId, targetNodes, knownIds = null) {
     const syncFolderInfo = await new Promise(resolve => chrome.bookmarks.get(syncFolderId, resolve));
     const rootParentId = syncFolderInfo[0].parentId;
     const rootIndex = syncFolderInfo[0].index;
@@ -568,7 +578,7 @@ async function applyTreeToLocal(syncFolderId, targetNodes) {
             }
         }
 
-        const toArchive = localChildren.filter(local => !claimedIds.has(local.id));
+        const toArchive = localChildren.filter(local => !claimedIds.has(local.id) && (!knownIds || knownIds.has(local.id)));
         if (toArchive.length > 0) {
             const archiveFolderId = await getOrCreateArchiveFolder(rootParentId, rootIndex + 1);
             for (const localNode of toArchive) {
@@ -640,7 +650,9 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             const syncFolderId = syncFolder.id;
             if (!syncFolderId) throw new SyncError(t('errFolderCreate'));
 
-            const local = normalizeNode(await getBookmarksTreeAsync(syncFolderId));
+            const localTree = await getBookmarksTreeAsync(syncFolderId);
+            const knownIds = collectIds(localTree);
+            const local = normalizeNode(localTree);
             local.children = withoutArchiveFolder(local.children);
             const remote = await fetchRemoteTree(fileUrl, authHeader);
             noteRemoteFormat(remote);
@@ -659,7 +671,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             if (remoteChanged) {
                 uploadChildren = mergeChildren(savedBase, local.children, remote.tree.children);
                 if (!sameTree(uploadChildren, local.children)) {
-                    ({ skipped, counts } = await applyTreeToLocal(syncFolderId, uploadChildren));
+                    ({ skipped, counts } = await applyTreeToLocal(syncFolderId, uploadChildren, knownIds));
                 }
                 // The merge is applied locally: if the upload fails, the remote we read
                 // is the base, so its items aren't mistaken for local additions next time
@@ -770,7 +782,9 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
 
             // Local changes not exported yet are kept, not archived: only what was
             // deleted on the other side since our last sync goes to the archive
-            const local = normalizeNode(await getBookmarksTreeAsync(syncFolderId));
+            const localTree = await getBookmarksTreeAsync(syncFolderId);
+            const knownIds = collectIds(localTree);
+            const local = normalizeNode(localTree);
             local.children = withoutArchiveFolder(local.children);
             // Without a base (first import, a new server, or a folder deleted or renamed
             // and recreated empty) the server wins: the folder is restored from it, and a
@@ -779,7 +793,7 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             const savedBase = syncFolder.created ? null : await loadSyncBase(fileUrl);
             const target = mergeChildren(savedBase || local.children, local.children, remote.tree.children);
 
-            const { counts, skipped } = await applyTreeToLocal(syncFolderId, target);
+            const { counts, skipped } = await applyTreeToLocal(syncFolderId, target, knownIds);
             await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped));
 
             // Kept local changes still have to reach the server
@@ -910,6 +924,7 @@ async function isInsideSyncFolder(id) {
             resolve(result);
         }));
         if (!nodes || !nodes[0]) return false;
+        if (isArchiveFolder(nodes[0])) return false; // Archived items are never synced
         current = nodes[0].parentId;
     }
     return false;
@@ -1035,7 +1050,7 @@ async function testConnection({ serverUrl, username, password }) {
         }
     };
     const folderPath = decodeURIComponent(new URL(baseUrl).pathname).replace(/\/$/, '');
-    const folderBlock = blocks.find(block => hrefPath(block) === folderPath) || blocks[0];
+    const folderBlock = blocks.find(block => hrefPath(block) === folderPath) || body;
     if (!/<([a-z0-9]+:)?collection\s*\/>/i.test(folderBlock)) {
         return { status: "error", message: t('testFileUrl') };
     }
@@ -1102,9 +1117,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     } else if (request.action === "update_alarm") {
         // FIXED: Added missing listener for syncFrequency changes
         chrome.alarms.clear("autoPullAlarm", () => {
-            if (request.frequency) {
-                chrome.alarms.create("autoPullAlarm", { periodInMinutes: request.frequency });
-            }
+            chrome.storage.local.get(['autoSyncEnabled'], (result) => {
+                // Paused: the alarm is created again when automatic sync is turned on
+                if (request.frequency && result.autoSyncEnabled !== false) {
+                    chrome.alarms.create("autoPullAlarm", { periodInMinutes: request.frequency });
+                }
+            });
         });
         sendResponse({ status: "success" });
     }
