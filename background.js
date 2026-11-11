@@ -31,6 +31,40 @@ let syncTimeout = null;
 let pendingLockRemoval = null;
 
 // ==========================================
+// ERROR MESSAGES
+// ==========================================
+// Shown in the popup: they must say what to fix, not just that something failed.
+
+const SETUP_HINT_URL = "https://<server>/remote.php/dav/files/<user>/<folder>/";
+const NETWORK_ERROR_MESSAGE = "Server unreachable. Check the URL and your connection.";
+
+function describeHttpStatus(status) {
+    if (status === 401) return "Wrong username or app password.";
+    if (status === 403) return "Access denied by the server.";
+    // 404 on the folder, 409 when writing into a folder that doesn't exist
+    if (status === 404 || status === 409) return "Folder not found. Create it in Nextcloud Files first.";
+    if (status === 405 || status === 501) return `Not a WebDAV folder URL. Use ${SETUP_HINT_URL}`;
+    if (status === 507) return "Not enough storage space on the server.";
+    if (status >= 500) return `Nextcloud server error (HTTP ${status}).`;
+    return `Unexpected server response (HTTP ${status}).`;
+}
+
+// An error whose message can be shown as is
+class SyncError extends Error {
+    constructor(userMessage) {
+        super(userMessage);
+        this.userMessage = userMessage;
+    }
+}
+
+function userMessageFor(error, fallback) {
+    if (error && error.userMessage) return error.userMessage;
+    // fetch() rejects with a TypeError on network, DNS or certificate failures
+    if (error && error.name === 'TypeError') return NETWORK_ERROR_MESSAGE;
+    return fallback;
+}
+
+// ==========================================
 // WEBDAV / NEXTCLOUD HELPER FUNCTIONS
 // ==========================================
 
@@ -51,7 +85,7 @@ async function getActiveLocks(baseUrl, authHeader) {
         if (response.status === 404) return [];
         // Nextcloud's own file locking: another device is writing right now
         if (response.status === 423) return ['nextcloud-file-lock'];
-        if (!response.ok) return null;
+        if (!response.ok) return { error: describeHttpStatus(response.status) };
 
         // An unreadable lock file (empty, hand-edited) is ignored: otherwise it would
         // block every device for good, since it never reaches the staleness check
@@ -68,7 +102,7 @@ async function getActiveLocks(baseUrl, authHeader) {
         return [lock.owner];
     } catch (error) {
         console.error("Lock check failed:", error);
-        return null;
+        return { error: NETWORK_ERROR_MESSAGE };
     }
 }
 
@@ -89,11 +123,11 @@ async function createLock(baseUrl, authHeader, extensionId) {
 
         // Nextcloud's own file locking: busy right now, worth retrying
         if (response.status === 423) return { busy: true };
-        if (!response.ok) return null;
+        if (!response.ok) return { error: describeHttpStatus(response.status) };
         return { lockFile: LOCK_FILE_NAME };
     } catch (error) {
         console.error("Lock creation failed:", error);
-        return null;
+        return { error: NETWORK_ERROR_MESSAGE };
     }
 }
 
@@ -124,14 +158,14 @@ async function removeLock(baseUrl, authHeader, lockFile) {
 // Returns { lockFile } on success, or { status, message } when the sync must not proceed.
 async function acquireLock(baseUrl, authHeader, extensionId) {
     const activeLocks = await getActiveLocks(baseUrl, authHeader);
-    if (activeLocks === null) return { status: "error", message: "Server error." };
+    if (activeLocks.error) return { status: "error", message: activeLocks.error };
 
     const otherLocks = activeLocks.filter(lock => !lock.startsWith(extensionId));
     if (otherLocks.length > 0) return { status: "locked", message: "Another device is syncing." };
 
     const created = await createLock(baseUrl, authHeader, extensionId);
-    if (created && created.busy) return { status: "locked", message: "Another device is syncing." };
-    if (!created) return { status: "error", message: "Lock failed." };
+    if (created.busy) return { status: "locked", message: "Another device is syncing." };
+    if (created.error) return { status: "error", message: created.error };
     const lockFile = created.lockFile;
 
     // The lock we just wrote replaces the previous pull's: its delayed removal would delete ours
@@ -359,7 +393,7 @@ async function fetchRemoteTree(fileUrl, authHeader) {
     });
 
     if (response.status === 404) return { exists: false, tree: null, etag: null };
-    if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+    if (!response.ok) throw new SyncError(describeHttpStatus(response.status));
 
     const etag = originalEtag(response.headers ? response.headers.get('ETag') : null);
     let data = null;
@@ -478,13 +512,14 @@ async function applyTreeToLocal(syncFolderId, targetNodes) {
 // ==========================================
 
 async function pushBookmarksToServer(sendResponse = () => {}) {
+    sendResponse = recordingResponse("export", sendResponse);
     if (isSyncing) return sendResponse({ status: "locked", message: "Sync already in progress." });
     isSyncing = true;
 
     chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId'], async (result) => {
         if (!result.serverUrl || !result.username || !result.password || !result.extensionId) {
             isSyncing = false;
-            return sendResponse({ status: "error", message: "Missing credentials." });
+            return sendResponse({ status: "error", message: "Not set up yet: open Settings (⚙️)." });
         }
 
         const { serverUrl, username, password, extensionId } = result;
@@ -501,7 +536,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             myLockFile = lock.lockFile;
 
             const syncFolderId = await getOrCreateSyncFolder();
-            if (!syncFolderId) throw new Error("Could not create Sync Folder.");
+            if (!syncFolderId) throw new SyncError("Could not create the bookmark folder.");
 
             const local = normalizeNode(await getBookmarksTreeAsync(syncFolderId));
             const remote = await fetchRemoteTree(fileUrl, authHeader);
@@ -553,7 +588,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
             if (response.status === 412) {
                 return sendResponse({ status: "locked", message: "Remote file changed, try again." });
             }
-            if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+            if (!response.ok) throw new SyncError(describeHttpStatus(response.status));
 
             await saveSyncBase(fileUrl, withoutSkipped(uploadChildren, skipped));
 
@@ -563,7 +598,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
 
         } catch (error) {
             console.error("PUSH Error:", error);
-            sendResponse({ status: "error", message: "Export failed." });
+            sendResponse({ status: "error", message: userMessageFor(error, "Export failed.") });
         } finally {
             await removeLock(baseUrl, authHeader, myLockFile);
             isSyncing = false;
@@ -576,13 +611,14 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
 // ==========================================
 
 async function pullBookmarksFromServer(sendResponse = () => {}) {
+    sendResponse = recordingResponse("import", sendResponse);
     if (isSyncing) return sendResponse({ status: "locked", message: "Sync already in progress." });
     isSyncing = true;
 
     chrome.storage.local.get(['serverUrl', 'username', 'password', 'extensionId'], async (result) => {
         if (!result.serverUrl || !result.username || !result.password || !result.extensionId) {
             isSyncing = false;
-            return sendResponse({ status: "error", message: "Missing credentials." });
+            return sendResponse({ status: "error", message: "Not set up yet: open Settings (⚙️)." });
         }
 
         const { serverUrl, username, password, extensionId } = result;
@@ -603,12 +639,12 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
 
             if (!remote.tree) {
                 isSyncing = false;
-                const message = remote.exists ? "Invalid remote file. Export to replace it." : "No file found.";
+                const message = remote.exists ? "Invalid remote file. Export to replace it." : "No bookmarks file on the server yet: export from a device first.";
                 return sendResponse({ status: "error", message });
             }
 
             const syncFolderId = await getOrCreateSyncFolder();
-            if (!syncFolderId) throw new Error("Could not find Sync Folder.");
+            if (!syncFolderId) throw new SyncError("Could not create the bookmark folder.");
 
             // Local changes not exported yet are kept, not archived: only what was
             // deleted on the other side since our last sync goes to the archive
@@ -635,7 +671,7 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
         } catch (error) {
             console.error("PULL Error:", error);
             isSyncing = false;
-            sendResponse({ status: "error", message: "Import crashed." });
+            sendResponse({ status: "error", message: userMessageFor(error, "Import failed.") });
         } finally {
             pendingLockRemoval = setTimeout(async () => {
                 pendingLockRemoval = null;
@@ -709,13 +745,81 @@ function scheduleAutomaticPush() {
 }
 
 // ==========================================
+// SYNC STATUS & CONNECTION TEST
+// ==========================================
+
+// Keeps the outcome of the last export or import, shown in the popup, and flags a
+// failure on the toolbar icon: automatic syncs would otherwise fail silently
+function recordSyncResult(kind, response) {
+    if (!response || response.status === "locked") return; // Transient: retried later
+    const ok = response.status === "success";
+    chrome.storage.local.set({ lastSync: { kind, ok, message: response.message, time: Date.now() } });
+
+    if (chrome.action) {
+        chrome.action.setBadgeText({ text: ok ? "" : "!" });
+        if (!ok) chrome.action.setBadgeBackgroundColor({ color: "#c0392b" });
+    }
+}
+
+function recordingResponse(kind, sendResponse) {
+    return (response) => {
+        recordSyncResult(kind, response);
+        sendResponse(response);
+    };
+}
+
+// Checks the settings typed in the popup (not yet saved) with a WebDAV PROPFIND on
+// the folder, and says precisely what is wrong
+async function testConnection({ serverUrl, username, password }) {
+    if (!serverUrl || !username || !password) {
+        return { status: "error", message: "Fill in the folder URL, username and app password." };
+    }
+
+    const baseUrl = serverUrl.endsWith('/') ? serverUrl : serverUrl + '/';
+    const authHeader = 'Basic ' + toBase64Utf8(username + ':' + password);
+
+    let response;
+    try {
+        response = await fetch(baseUrl, {
+            method: 'PROPFIND',
+            credentials: 'omit',
+            headers: { 'Authorization': authHeader, 'Depth': '1' }
+        });
+    } catch (error) {
+        console.error("Connection test failed:", error);
+        return { status: "error", message: NETWORK_ERROR_MESSAGE };
+    }
+
+    if (response.status !== 207) {
+        // A web page rather than WebDAV, e.g. the Nextcloud login or files page
+        if (response.ok) return { status: "error", message: `Not a WebDAV folder URL. Use ${SETUP_HINT_URL}` };
+        return { status: "error", message: describeHttpStatus(response.status) };
+    }
+
+    const body = await response.text();
+    if (!/<([a-z0-9]+:)?collection\s*\/>/i.test(body)) {
+        return { status: "error", message: "This URL points to a file. Use the URL of a folder." };
+    }
+
+    const hasFile = body.includes('bookmarks_sync.json');
+    return {
+        status: "success",
+        message: hasFile
+            ? "Connected. Bookmarks file found on the server."
+            : "Connected. No bookmarks file yet: Export creates it."
+    };
+}
+
+// ==========================================
 // EVENT LISTENERS
 // ==========================================
 
 // Listen to messages from popup.js
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    // FIXED: Matched action names from popup.js
-    if (request.action === "push_bookmarks") {
+    if (request.action === "test_connection") {
+        testConnection(request).then(sendResponse);
+        return true;
+    } else if (request.action === "push_bookmarks") {
         pushBookmarksToServer(sendResponse);
         return true;
     } else if (request.action === "pull_bookmarks") {

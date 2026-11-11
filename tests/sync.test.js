@@ -71,11 +71,15 @@ function loadBackground(server) {
         if (control.gate) await control.gate;
         log.push(`${opts.method} ${url.split('/').pop()}`);
         const res = server(url, opts);
+        // { network: true } simulates fetch() rejecting (DNS, certificate, offline)
+        if (res.network) throw new TypeError('Failed to fetch');
         return {
             status: res.status, ok: res.status >= 200 && res.status < 300, json: async () => res.body,
+            text: async () => (typeof res.body === 'string' ? res.body : JSON.stringify(res.body)),
             headers: { get: (h) => (h === 'ETag' ? res.etag || null : null) },
         };
     };
+    const badge = { text: '', color: null };
     const sandbox = {
         chrome: {
             runtime, bookmarks,
@@ -84,6 +88,10 @@ function loadBackground(server) {
                 set: (o, cb) => { Object.assign(store, o); setImmediate(() => cb && cb()); },
             } },
             alarms: { create() {}, clear() {}, onAlarm: { addListener() {} } },
+            action: {
+                setBadgeText: ({ text }) => { badge.text = text; },
+                setBadgeBackgroundColor: ({ color }) => { badge.color = color; },
+            },
         },
         fetch: fetchStub, console: { log() {}, warn() {}, error() {} },
         // Timers are recorded, not run: each test fires them by hand
@@ -103,7 +111,7 @@ function loadBackground(server) {
     const call = (name) => new Promise((resolve) => sandbox[name](resolve));
     // Runs the onInstalled listener and waits for its async work
     const installed = async (details) => { runtime.installed(details); await flush(); };
-    return { sandbox, log, timers, bookmarks, seed, addLocal, titlesIn, flush, call, control, store, installed };
+    return { sandbox, log, timers, bookmarks, seed, addLocal, titlesIn, flush, call, control, store, installed, badge };
 }
 
 // No lock and no remote file yet
@@ -720,10 +728,120 @@ test('push: after a 412 the remote read becomes the base, so a third-device dele
 });
 
 // ------------------------------------------------------------------
+// Error messages, sync status, connection test
+// ------------------------------------------------------------------
+
+const lockGet = (status) => (url, opts) => (url === LOCK_URL && opts.method === 'GET') ? status : noLock(url, opts);
+
+test('errors: each server failure says what to fix', async () => {
+    const cases = [
+        [lockGet({ status: 401 }), 'Wrong username or app password.'],
+        [lockGet({ status: 404 }), null], // 404 on the lock only means "no lock"
+        [(url, opts) => (url === LOCK_URL && opts.method === 'PUT') ? { status: 409 } : noLock(url, opts), 'Folder not found. Create it in Nextcloud Files first.'],
+        [(url, opts) => (url === LOCK_URL && opts.method === 'PUT') ? { status: 405 } : noLock(url, opts), /^Not a WebDAV folder URL\. Use https:\/\//],
+        [(url, opts) => (url === JSON_URL && opts.method === 'PUT') ? { status: 507 } : noLock(url, opts), 'Not enough storage space on the server.'],
+        [(url, opts) => (url === JSON_URL && opts.method === 'GET') ? { status: 503 } : noLock(url, opts), 'Nextcloud server error (HTTP 503).'],
+        [lockGet({ network: true }), 'Server unreachable. Check the URL and your connection.'],
+        [(url, opts) => (url === JSON_URL && opts.method === 'PUT') ? { network: true } : noLock(url, opts), 'Server unreachable. Check the URL and your connection.'],
+    ];
+    for (const [server, expected] of cases) {
+        const b = loadBackground(server);
+        await b.seed();
+        const res = await b.call('pushBookmarksToServer');
+        if (expected === null) {
+            assert.strictEqual(res.status, 'success', res.message);
+        } else {
+            assert.strictEqual(res.status, 'error');
+            if (expected instanceof RegExp) assert.match(res.message, expected); else assert.strictEqual(res.message, expected);
+        }
+    }
+});
+
+test('errors: an import against a missing file explains what to do', async () => {
+    const b = loadBackground(noLock);
+    await b.seed();
+    const res = await b.call('pullBookmarksFromServer');
+    assert.strictEqual(res.message, 'No bookmarks file on the server yet: export from a device first.');
+});
+
+test('errors: syncing before setup points to the settings', async () => {
+    const b = loadBackground(noLock);
+    delete b.store.serverUrl;
+    const res = await b.call('pushBookmarksToServer');
+    assert.strictEqual(res.message, 'Not set up yet: open Settings (⚙️).');
+});
+
+test('status: a failed sync is recorded and flagged on the icon, a success clears it', async () => {
+    let fail = true;
+    const b = loadBackground((url, opts) => (fail && url === LOCK_URL && opts.method === 'GET') ? { status: 401 } : noLock(url, opts));
+    await b.seed();
+    await b.call('pushBookmarksToServer');
+    await b.flush();
+    assert.strictEqual(b.store.lastSync.kind, 'export');
+    assert.strictEqual(b.store.lastSync.ok, false);
+    assert.strictEqual(b.store.lastSync.message, 'Wrong username or app password.');
+    assert.strictEqual(b.badge.text, '!');
+    fail = false;
+    await b.call('pushBookmarksToServer');
+    await b.flush();
+    assert.strictEqual(b.store.lastSync.ok, true);
+    assert.strictEqual(b.badge.text, '');
+});
+
+test('status: a busy server (locked) is not recorded as a failure', async () => {
+    const b = loadBackground(lockedBy('firefox2'));
+    await b.seed();
+    await b.call('pushBookmarksToServer');
+    await b.flush();
+    assert.strictEqual(b.store.lastSync, undefined);
+    assert.strictEqual(b.badge.text, '');
+});
+
+const propfind = (status, body = '') => (url, opts) => (opts.method === 'PROPFIND' ? { status, body } : { status: 404 });
+const FOLDER = '<d:multistatus><d:response><d:href>/dav/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>';
+const testConnection = (server, settings = { serverUrl: 'https://cloud.example/dav', username: 'u', password: 'p' }) =>
+    loadBackground(server).sandbox.testConnection(settings);
+
+test('connection test: a reachable folder, with or without the bookmarks file', async () => {
+    let r = await testConnection(propfind(207, FOLDER + '<d:response><d:href>/dav/bookmarks_sync.json</d:href></d:response></d:multistatus>'));
+    assert.deepStrictEqual([r.status, r.message], ['success', 'Connected. Bookmarks file found on the server.']);
+    r = await testConnection(propfind(207, FOLDER + '</d:multistatus>'));
+    assert.deepStrictEqual([r.status, r.message], ['success', 'Connected. No bookmarks file yet: Export creates it.']);
+});
+
+test('connection test: each problem gets its own message', async () => {
+    const cases = [
+        [propfind(401), 'Wrong username or app password.'],
+        [propfind(404), 'Folder not found. Create it in Nextcloud Files first.'],
+        [propfind(200, '<html>Nextcloud login</html>'), /^Not a WebDAV folder URL\./],
+        [propfind(405), /^Not a WebDAV folder URL\./],
+        [propfind(207, '<d:multistatus><d:response><d:resourcetype/></d:response></d:multistatus>'), 'This URL points to a file. Use the URL of a folder.'],
+        [() => ({ network: true }), 'Server unreachable. Check the URL and your connection.'],
+    ];
+    for (const [server, expected] of cases) {
+        const r = await testConnection(server);
+        assert.strictEqual(r.status, 'error');
+        if (expected instanceof RegExp) assert.match(r.message, expected); else assert.strictEqual(r.message, expected);
+    }
+    const r = await testConnection(propfind(207, FOLDER), { serverUrl: 'https://c.example/dav', username: '', password: '' });
+    assert.strictEqual(r.message, 'Fill in the folder URL, username and app password.');
+});
+
+test('connection test: PROPFIND on the folder with the typed credentials', async () => {
+    const seen = [];
+    await testConnection((url, opts) => { seen.push({ url, method: opts.method, auth: opts.headers.Authorization, depth: opts.headers.Depth }); return { status: 207, body: FOLDER }; },
+        { serverUrl: 'https://cloud.example/dav', username: 'alice', password: 'pä' });
+    assert.deepStrictEqual(seen, [{ url: 'https://cloud.example/dav/', method: 'PROPFIND', auth: 'Basic ' + Buffer.from('alice:pä').toString('base64'), depth: '1' }]);
+});
+
+
+// ------------------------------------------------------------------
 // Popup
 // ------------------------------------------------------------------
 
-async function popup(serverUrl) {
+// Loads popup.js against a fake DOM, fills the fields, clicks a button.
+// response is what the background script answers.
+async function popup(serverUrl, { button = 'pushBtn', fields = {}, response = { status: 'success', message: 'ok' }, stored = {} } = {}) {
     const els = new Map();
     const el = (id) => {
         if (!els.has(id)) {
@@ -739,14 +857,15 @@ async function popup(serverUrl) {
     let ready;
     const requests = [];
     const sent = [];
+    const messages = [];
     const sandbox = {
         document: { getElementById: el, addEventListener: (t, f) => { if (t === 'DOMContentLoaded') ready = f; }, querySelectorAll: () => [], querySelector: () => el('q') },
         window: { addEventListener() {} }, navigator: { userAgent: 'test', brave: undefined },
-        console: { log() {}, warn() {}, error() {} }, setTimeout: () => 0, clearTimeout() {}, URL, Math, parseInt, Promise,
+        console: { log() {}, warn() {}, error() {} }, setTimeout: () => 0, clearTimeout() {}, URL, Math, parseInt, Promise, Date, Boolean,
         chrome: {
-            storage: { local: { get: (k, cb) => cb({}), set: (o, cb) => cb && cb() } },
+            storage: { local: { get: (k, cb) => cb({ ...stored }), set: (o, cb) => cb && cb() }, onChanged: { addListener() {} } },
             permissions: { request: (p, cb) => { requests.push(p.origins[0]); cb(true); } },
-            runtime: { sendMessage: (m, cb) => { sent.push(m.action); if (cb) cb({ status: 'success', message: 'ok' }); } },
+            runtime: { sendMessage: (m, cb) => { sent.push(m.action); messages.push(m); if (cb) cb(response); } },
         },
     };
     vm.createContext(sandbox);
@@ -754,8 +873,15 @@ async function popup(serverUrl) {
     await ready();
     await new Promise(r => setTimeout(r, 20));
     el('serverUrl').value = serverUrl;
-    await el('pushBtn').listeners.click();
-    return { requests, sent, status: el('status').textContent };
+    for (const [id, value] of Object.entries(fields)) el(id).value = value;
+    await el(button).listeners.click();
+    return {
+        requests, sent, messages,
+        status: el('status').textContent,
+        testResult: el('testResult').textContent,
+        setupHidden: el('setupCard').hidden,
+        lastSync: el('lastSync').textContent,
+    };
 }
 
 test('popup: the port is dropped from the permission pattern', async () => {
@@ -774,4 +900,41 @@ test('popup: an invalid URL is reported', async () => {
     const r = await popup('not a url');
     assert.deepStrictEqual(r.requests, []);
     assert.strictEqual(r.status, 'Invalid server URL.');
+});
+
+test('popup: syncing with no URL points to the settings', async () => {
+    const r = await popup('');
+    assert.deepStrictEqual(r.sent, []);
+    assert.strictEqual(r.status, 'Not set up yet: open Settings (⚙️).');
+});
+
+test('popup: the setup card shows until the URL, username and password are saved', async () => {
+    assert.strictEqual((await popup('')).setupHidden, false);
+    const configured = await popup('', { stored: { serverUrl: 'https://c.example/dav/', username: 'u', password: 'p' } });
+    assert.strictEqual(configured.setupHidden, true);
+});
+
+test('popup: the last sync result is shown, failures with their reason', async () => {
+    const failed = await popup('', { stored: { lastSync: { kind: 'export', ok: false, message: 'Wrong username or app password.', time: Date.now() } } });
+    assert.match(failed.lastSync, /^Last export failed \(.+\): Wrong username or app password\.$/);
+    const ok = await popup('', { stored: { lastSync: { kind: 'import', ok: true, message: '1 item imported!', time: Date.now() } } });
+    assert.match(ok.lastSync, /^Last sync: Import OK, /);
+});
+
+test('popup: test connection sends the typed values, not the saved ones', async () => {
+    const r = await popup('https://cloud.example/dav/f/', {
+        button: 'testConnectionBtn',
+        fields: { username: ' alice ', password: 'secret' },
+        response: { status: 'success', message: 'Connected. No bookmarks file yet: Export creates it.' },
+    });
+    assert.deepStrictEqual(r.requests, ['https://cloud.example/*']);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(r.messages[0])),
+        { action: 'test_connection', serverUrl: 'https://cloud.example/dav/f/', username: 'alice', password: 'secret' });
+    assert.strictEqual(r.testResult, 'Connected. No bookmarks file yet: Export creates it.');
+});
+
+test('popup: test connection reports a bad URL without contacting the server', async () => {
+    const r = await popup('http://cloud.example/dav/', { button: 'testConnectionBtn' });
+    assert.deepStrictEqual(r.sent, []);
+    assert.strictEqual(r.testResult, 'Server URL must use https.');
 });

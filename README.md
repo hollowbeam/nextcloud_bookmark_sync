@@ -13,6 +13,7 @@ Say goodbye to Big Tech's cloud services. Keep your bookmarks perfectly synced a
 * **🎯 Exact Ordering & Strict Matching:** Bookmarks are matched purely by URL across different browser engines (solving local ID mismatch issues). Their exact visual order is also perfectly replicated everywhere.
 * **🛡️ Collision Protection:** Uses a lock file (`bookmarks_sync.lock`) via WebDAV so that a device backs off with a "locked" status if another device is already syncing, and automatic exports are retried afterwards. It's a best-effort lock (not an atomic distributed mutex) with a 5-minute staleness timeout, so a crashed device can never leave sync permanently blocked.
 * **🔀 Concurrent Changes Merged:** Each device remembers the folder as of its last sync. If another device exported in the meantime, changes from both sides are merged (additions kept, deletions and renames applied) instead of the last export replacing the other's. The upload is conditional (`If-Match` on the file's ETag), so a write that slips in between is detected and retried rather than overwritten.
+* **🩺 Clear Diagnostics:** A **Test connection** button and precise error messages (wrong password, folder not found, not a WebDAV URL, server unreachable). The last sync result is shown in the popup, and a failed automatic sync is flagged on the toolbar icon.
 * **⚡ Native Integration:** Creates a dedicated "🔄 Bookmark Sync" folder right in your Bookmarks Bar for easy, isolated access.
 
 ## 📋 Prerequisites
@@ -20,7 +21,7 @@ Say goodbye to Big Tech's cloud services. Keep your bookmarks perfectly synced a
 Before using this extension, you will need:
 
 1. A running **Nextcloud** instance.
-2. Your Nextcloud WebDAV URL (usually `https://[your-server]/remote.php/dav/files/[your-username]/`).
+2. A folder in Nextcloud Files for the bookmarks file, and its WebDAV URL (see the [Setup Guide](#setup-guide)).
 3. An **App Password** generated from your Nextcloud Security settings (Do not use your main Nextcloud password!).
 
 ## 🚀 Installation
@@ -41,23 +42,27 @@ Before using this extension, you will need:
    * Go to `about:debugging#/runtime/this-firefox`.
    * Click **Load Temporary Add-on...** and select the `manifest.json` file from the folder.
 
-## ⚙️ Configuration & Usage
+## Setup Guide
 
-1. Click on the **Nextcloud Bookmark Sync** icon in your browser toolbar.
-2. You can quickly pause or resume background syncing using the **Auto-sync toggle** on the main screen.
-3. Click the **Gear icon** (⚙️) to open the Settings view and fill in your details:
-   * **Target Folder URL:** Your Nextcloud WebDAV path. It must start with `https://`: your credentials are sent with every sync.
-   * **Username:** Your Nextcloud username.
-   * **App Password:** The app password you generated in Nextcloud.
-   * **Auto-Sync Frequency:** Choose how often the background script should check for updates.
-   * **Archive Retention:** Use the cross-browser slider to set how long deleted items should be kept before permanent deletion (1 to 30 days).
-4. *Settings are auto-saved as you type.* Click **← Back to Sync**.
-5. Click **Export to Nextcloud** to push your current bookmarks to the server for the first time.
-6. Install the extension on your other browsers/computers, enter the exact same credentials, and click **Import from Nextcloud** to pull the data.
+The extension syncs only the bookmarks inside its **"🔄 Bookmark Sync"** folder, and stores them as a single file, `bookmarks_sync.json`, in a folder of your **Nextcloud Files**. It does not use the Nextcloud Bookmarks app.
 
-*After the initial setup, the extension will handle syncing automatically in the background.*
+1. **Create a folder in Nextcloud Files**, for example `Bookmarks`. The extension writes its file there.
+2. **Create an app password:** in Nextcloud, open **Settings › Security**, and under *Devices & sessions* create a new app password (name it e.g. "Bookmark Sync"). Don't use your main password.
+3. **Find the folder's WebDAV URL:** in Nextcloud Files, open **Files settings** (bottom left). It shows your WebDAV address, usually `https://[your-server]/remote.php/dav/files/[your-username]/`. Add your folder name at the end: `https://[your-server]/remote.php/dav/files/[your-username]/Bookmarks/`. It must start with `https://`.
+4. **Fill in the settings:** click the extension icon, then the **gear icon** (⚙️), and enter the folder URL, your Nextcloud username and the app password. Settings are saved as you type.
+5. **Click "Test connection".** It tells you exactly what's wrong if something is: wrong username or app password, folder not found, not a WebDAV URL, server unreachable. The first time, the browser asks for access to your Nextcloud domain: accept it.
+6. **Click ← Back to Sync, then "Export to Nextcloud"** to send this browser's bookmarks.
+7. **On your other browsers and computers**, install the extension, enter the same settings, and click **"Import from Nextcloud"**.
 
-> **Note:** The extension only ever requests access to the one Nextcloud domain you configure (not to every website). The very first click of **Export** or **Import** triggers a one-time browser permission prompt for that domain — accept it so the automatic background sync can reach your server afterwards.
+After that, syncing is automatic: changes are exported a few seconds after you make them, and imported in the background at the frequency you choose. The **Auto-sync toggle** on the main screen pauses or resumes it.
+
+The main screen shows the result of the last sync. If an automatic sync fails, a red **!** appears on the extension icon; open the popup to see why.
+
+Other settings:
+* **Auto-Sync Frequency:** how often the background import runs.
+* **Archive Retention:** how long deleted items stay in the archive before permanent deletion (1 to 30 days).
+
+> **Note:** The extension only ever requests access to the one Nextcloud domain you configure (not to every website), when you first click **Test connection**, **Export** or **Import**. Accept the prompt so the automatic background sync can reach your server afterwards.
 
 ## 🛠️ How it Works (Under the Hood)
 

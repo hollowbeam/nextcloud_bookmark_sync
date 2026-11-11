@@ -33,7 +33,25 @@
         #pullBtn { background-color: #e67e22; }
 
         /* Status message */
-        #status { margin-top: 15px; font-weight: bold; font-size: 13px; text-align: center; height: 16px; transition: color 0.3s; }
+        #status { margin-top: 15px; font-weight: bold; font-size: 13px; text-align: center; min-height: 16px; transition: color 0.3s; }
+
+        /* Last sync line */
+        #lastSync { margin-top: 8px; font-size: 11px; color: #777; text-align: center; }
+        #lastSync.failed { color: #c0392b; }
+
+        /* First-run setup card */
+        .setup-card { background: #eaf4fb; border: 1px solid #b6dcf2; border-radius: 6px; padding: 10px 12px; font-size: 12px; margin-bottom: 4px; }
+        .setup-card strong { color: #0082c9; }
+        .setup-card ol { margin: 6px 0 8px; padding-left: 18px; }
+        .setup-card li { margin-bottom: 3px; }
+
+        /* Help text and secondary actions in settings */
+        .hint { font-size: 11px; color: #777; margin: 4px 0 0; }
+        .hint code { font-size: 11px; }
+        .secondary-btn { width: 100%; padding: 8px; margin-top: 10px; background: #fff; color: #0082c9; border: 1px solid #0082c9; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; }
+        .secondary-btn:hover { background: #eaf4fb; }
+        #testResult { margin-top: 6px; font-size: 12px; font-weight: bold; min-height: 14px; }
+        a { color: #0082c9; }
         .save-indicator { font-size: 11px; color: #27ae60; text-align: right; height: 14px; margin-top: 4px; opacity: 0; transition: opacity 0.3s; }
 
         /* --- CROSS-BROWSER RANGE SLIDER STYLING --- */
@@ -123,6 +141,16 @@
     </div>
 
     <div id="mainView" class="view active">
+        <div id="setupCard" class="setup-card" hidden>
+            <strong>Not set up yet</strong>
+            <ol>
+                <li>In Nextcloud Files, create a folder for your bookmarks.</li>
+                <li>In Nextcloud, go to Settings › Security and create an app password.</li>
+                <li>Enter the folder's WebDAV URL, your username and the app password in the settings.</li>
+            </ol>
+            <button id="openSettingsBtn" class="secondary-btn" style="margin-top: 0;">Open settings</button>
+        </div>
+
         <button id="pushBtn" class="action-btn">Export to Nextcloud</button>
         <button id="pullBtn" class="action-btn">Import from Nextcloud</button>
 
@@ -134,19 +162,26 @@
         </div>
 
         <div id="status"></div>
+        <div id="lastSync"></div>
     </div>
 
     <div id="settingsView" class="view">
         <button id="goToMainBtn" class="back-btn">← Back to Sync</button>
 
         <label for="serverUrl">Nextcloud Target Folder URL</label>
-        <input type="text" id="serverUrl" placeholder="https://[server]/remote.php/dav/files/[user]/">
+        <input type="text" id="serverUrl" placeholder="https://[server]/remote.php/dav/files/[user]/[folder]/">
+        <p class="hint">Create the folder in Nextcloud Files first. Nextcloud shows the WebDAV address under Files › Files settings; add your folder name to it. Bookmarks are saved there as <code>bookmarks_sync.json</code> (this doesn't use the Nextcloud Bookmarks app).</p>
 
         <label for="username">Nextcloud Username</label>
         <input type="text" id="username">
 
         <label for="password">App Password</label>
         <input type="password" id="password">
+        <p class="hint">Create one in Nextcloud under Settings › Security. Don't use your main password.</p>
+
+        <button id="testConnectionBtn" class="secondary-btn">Test connection</button>
+        <div id="testResult"></div>
+        <p class="hint"><a href="https://github.com/hollowbeam/nextcloud_bookmark_sync#setup-guide" target="_blank" rel="noopener">Setup help</a></p>
 
         <label for="syncFrequency">Auto-Sync Frequency (Background)</label>
         <select id="syncFrequency">

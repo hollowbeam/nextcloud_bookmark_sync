@@ -41,14 +41,48 @@ document.addEventListener('DOMContentLoaded', async () => {
     const mainView = document.getElementById('mainView');
     const settingsView = document.getElementById('settingsView');
 
-    document.getElementById('goToSettingsBtn').addEventListener('click', () => {
+    const showSettings = () => {
         mainView.classList.remove('active');
         settingsView.classList.add('active');
-    });
+    };
+    document.getElementById('goToSettingsBtn').addEventListener('click', showSettings);
+    document.getElementById('openSettingsBtn').addEventListener('click', showSettings);
 
     document.getElementById('goToMainBtn').addEventListener('click', () => {
         settingsView.classList.remove('active');
         mainView.classList.add('active');
+    });
+
+
+    // First-run guidance: shown until the URL, username and password are filled in
+    function updateSetupCard(settings) {
+        const configured = settings.serverUrl && settings.username && settings.password;
+        document.getElementById('setupCard').hidden = Boolean(configured);
+    }
+
+    // Outcome of the last export or import (manual or automatic), kept by the background script
+    function renderLastSync(lastSync) {
+        const line = document.getElementById('lastSync');
+        if (!lastSync) {
+            line.textContent = '';
+            return;
+        }
+        const when = new Date(lastSync.time).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+        const what = lastSync.kind === 'import' ? 'Import' : 'Export';
+        line.className = lastSync.ok ? '' : 'failed';
+        line.textContent = lastSync.ok
+            ? `Last sync: ${what} OK, ${when}`
+            : `Last ${what.toLowerCase()} failed (${when}): ${lastSync.message}`;
+    }
+
+    chrome.storage.local.get(['lastSync'], (result) => renderLastSync(result.lastSync));
+
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local') return;
+        if (changes.lastSync) renderLastSync(changes.lastSync.newValue);
+        if (changes.serverUrl || changes.username || changes.password) {
+            chrome.storage.local.get(['serverUrl', 'username', 'password'], updateSetupCard);
+        }
     });
 
 
@@ -57,6 +91,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         'serverUrl', 'username', 'password', 'extensionId',
         'syncFrequency', 'autoSyncEnabled', 'retentionDays'
     ], async (result) => {
+        updateSetupCard(result);
 
         // Populate text inputs
         if (result.serverUrl) document.getElementById('serverUrl').value = result.serverUrl;
@@ -180,8 +215,58 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
 
-    // 6. Main Actions (Push & Pull)
-    // Wrapped inside DOMContentLoaded so document.getElementById doesn't fail
+    // 6. Server access
+    // Checks the URL and asks for the host permission (needs the user's click).
+    // Returns null when access is granted, otherwise the message to show.
+    async function requestServerAccess(serverUrl) {
+        if (!serverUrl) return "Not set up yet: open Settings (⚙️).";
+
+        let parsedUrl = null;
+        try {
+            parsedUrl = new URL(serverUrl);
+        } catch {
+            return "Invalid server URL.";
+        }
+
+        // The manifest only allows https hosts
+        if (parsedUrl.protocol !== 'https:') return "Server URL must use https.";
+
+        // Hostname rather than origin: Firefox match patterns don't support ports
+        const origin = `https://${parsedUrl.hostname}/*`;
+
+        const granted = await new Promise(resolve => chrome.permissions.request({ origins: [origin] }, resolve));
+        return granted ? null : "Permission denied for this server.";
+    }
+
+    const RED = "#c0392b";
+
+    // 7. Connection test (Settings View): uses the values typed, even if not saved yet
+    document.getElementById('testConnectionBtn').addEventListener('click', async () => {
+        const result = document.getElementById('testResult');
+        const settings = {
+            serverUrl: document.getElementById('serverUrl').value.trim(),
+            username: document.getElementById('username').value.trim(),
+            password: document.getElementById('password').value.trim(),
+        };
+
+        const accessError = await requestServerAccess(settings.serverUrl);
+        if (accessError) {
+            result.style.color = RED;
+            result.textContent = accessError;
+            return;
+        }
+
+        result.style.color = "#777";
+        result.textContent = "Testing...";
+        chrome.runtime.sendMessage({ action: "test_connection", ...settings }, (response) => {
+            const ok = response && response.status === "success";
+            result.style.color = ok ? "#27ae60" : RED;
+            result.textContent = response ? response.message : "Error.";
+        });
+    });
+
+
+    // 8. Main Actions (Push & Pull)
     function handleSyncAction(actionName, btnId, activeColor, loadingText) {
         const btn = document.getElementById(btnId);
         if (!btn) return;
@@ -190,29 +275,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             const status = document.getElementById('status');
             const serverUrl = document.getElementById('serverUrl').value.trim();
 
-            let parsedUrl = null;
-            try {
-                parsedUrl = new URL(serverUrl);
-            } catch {
-                // Reported below, with the other invalid URLs
-            }
-
-            // The manifest only allows https hosts
-            if (!parsedUrl || parsedUrl.protocol !== 'https:') {
-                status.style.color = "#c0392b";
-                status.textContent = parsedUrl ? "Server URL must use https." : "Invalid server URL.";
-                setTimeout(() => { status.textContent = ''; }, 3500);
-                return;
-            }
-
-            // Hostname rather than origin: Firefox match patterns don't support ports
-            const origin = `https://${parsedUrl.hostname}/*`;
-
-            const granted = await new Promise(resolve => chrome.permissions.request({ origins: [origin] }, resolve));
-            if (!granted) {
-                status.style.color = "#c0392b";
-                status.textContent = "Permission denied for this server.";
-                setTimeout(() => { status.textContent = ''; }, 3500);
+            const accessError = await requestServerAccess(serverUrl);
+            if (accessError) {
+                status.style.color = RED;
+                status.textContent = accessError;
                 return;
             }
 
@@ -220,17 +286,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             status.textContent = loadingText;
 
             chrome.runtime.sendMessage({ action: actionName }, (response) => {
-                if (response && response.status === "locked") {
-                    status.style.color = "#c0392b"; // Red
-                    status.textContent = response.message;
-                } else if (response && response.status === "success") {
-                    status.style.color = activeColor;
-                    status.textContent = response.message;
-                } else {
-                    status.style.color = "#c0392b";
-                    status.textContent = response ? response.message : "Error.";
+                const ok = response && response.status === "success";
+                status.style.color = ok ? activeColor : RED;
+                status.textContent = response ? response.message : "Error.";
+                // Errors stay until the next action: they say what to fix
+                if (ok || (response && response.status === "locked")) {
+                    setTimeout(() => { status.textContent = ''; }, 3500);
                 }
-                setTimeout(() => { status.textContent = ''; }, 3500);
             });
         });
     }
