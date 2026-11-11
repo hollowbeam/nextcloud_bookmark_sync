@@ -245,13 +245,27 @@ async function getBookmarksTreeAsync(folderId) {
 // FOLDER MANAGEMENT (SYNC & ARCHIVE)
 // ==========================================
 
+// Several folders can carry the name, e.g. when the browser's own sync (Chrome Sync,
+// Firefox Sync) merges a folder recreated on two devices. The oldest one is always the
+// synced folder, so the choice doesn't change from one sync to the next; the number of
+// extra folders is recorded for the popup to tell the user.
+function pickSyncFolder(results) {
+    const folders = (results || []).filter(r => !r.url && r.title === SYNC_FOLDER_NAME);
+    folders.sort((a, b) => ((a.dateAdded || 0) - (b.dateAdded || 0)) || String(a.id).localeCompare(String(b.id)));
+    const extra = Math.max(folders.length - 1, 0);
+    chrome.storage.local.get(['duplicateSyncFolders'], (stored) => {
+        if ((stored.duplicateSyncFolders || 0) !== extra) chrome.storage.local.set({ duplicateSyncFolders: extra });
+    });
+    return folders[0] || null;
+}
+
 // Get or Create the main Sync Folder (Cross-browser safe)
 // Returns { id, created }. created: the folder didn't exist (first use, or the user
 // deleted or renamed it). Its emptiness then says nothing about what to delete.
 async function getOrCreateSyncFolder() {
     return new Promise((resolve) => {
         chrome.bookmarks.search({ title: SYNC_FOLDER_NAME }, (results) => {
-            const folder = results.find(r => !r.url);
+            const folder = pickSyncFolder(results);
             if (folder) return resolve({ id: folder.id, created: false });
 
             // In the bookmarks bar: its id is '1' in Chrome, Brave and Edge, and
@@ -905,7 +919,7 @@ async function findSyncFolderId() {
     }
     if (!syncFolderSearch) {
         syncFolderSearch = new Promise(resolve => chrome.bookmarks.search({ title: SYNC_FOLDER_NAME }, (results) => {
-            const folder = (results || []).find(r => !r.url);
+            const folder = pickSyncFolder(results);
             cachedSyncFolderId = folder ? folder.id : null;
             syncFolderSearch = null;
             resolve(cachedSyncFolderId);
@@ -1140,7 +1154,7 @@ async function seedSyncBaseAfterUpdate() {
     if (await loadSyncBase(fileUrl)) return;
 
     const folder = await new Promise(resolve => chrome.bookmarks.search({ title: SYNC_FOLDER_NAME }, (results) => {
-        resolve(results.find(r => !r.url));
+        resolve(pickSyncFolder(results));
     }));
     if (!folder) return;
 

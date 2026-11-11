@@ -34,7 +34,7 @@ function makeBookmarks(runtime) {
     add({ id: '0', title: 'root', children: [] });
     add({ id: '1', parentId: '0', title: 'bar', children: [] });
     nodes.get('0').children.push('1');
-    const view = (n) => ({ id: n.id, parentId: n.parentId, title: n.title, url: n.url, index: n.parentId ? nodes.get(n.parentId).children.indexOf(n.id) : 0 });
+    const view = (n) => ({ id: n.id, parentId: n.parentId, title: n.title, url: n.url, dateAdded: n.dateAdded, index: n.parentId ? nodes.get(n.parentId).children.indexOf(n.id) : 0 });
     const fail = (cb, message) => { runtime.lastError = { message }; cb(undefined); runtime.lastError = undefined; };
     const moves = [];
     const api = {
@@ -1232,6 +1232,8 @@ async function popup(serverUrl, { button = 'syncBtn', fields = {}, response = { 
         setupHidden: el('setupCard').hidden,
         lastSync: el('lastSync').textContent,
         legacyHidden: el('legacyWarning').hidden,
+        duplicateHidden: el('duplicateWarning').hidden,
+        duplicateText: el('duplicateWarning').textContent,
         writes, removed, sandbox, order,
         version: el('version').textContent,
         el,
@@ -1493,4 +1495,49 @@ test('popup: a sync right after typing a setting uses the new value', async () =
     const saved = r.order.indexOf('set password');
     assert.ok(saved >= 0, 'pending save not flushed');
     assert.ok(saved < r.order.indexOf('send sync_now'), `order: ${r.order}`);
+});
+
+// ------------------------------------------------------------------
+// Several "🔄 Bookmark Sync" folders (e.g. after the browser's own sync)
+// ------------------------------------------------------------------
+
+test('folder: with several sync folders the oldest is always used, and the extras are counted', async () => {
+    const state = { remote: null };
+    const b = loadBackground(davServer(state));
+    const newer = await b.addLocal('1', '🔄 Bookmark Sync');
+    const older = await b.addLocal('1', '🔄 Bookmark Sync');
+    b.bookmarks.nodes.get(newer.id).dateAdded = 2000;
+    b.bookmarks.nodes.get(older.id).dateAdded = 1000;
+    await b.addLocal(older.id, 'Old', 'https://old.example/');
+    await b.addLocal(newer.id, 'New', 'https://new.example/');
+    const res = await b.call('pushBookmarksToServer');
+    await b.flush();
+    assert.strictEqual(res.status, 'success', res.message);
+    assert.deepStrictEqual(titles(state.remote.children), ['Old']);
+    assert.strictEqual(b.store.duplicateSyncFolders, 1);
+    assert.strictEqual(await b.sandbox.findSyncFolderId(), older.id);
+});
+
+test('folder: the extra-folder count goes back to 0 once the duplicate is gone', async () => {
+    const b = loadBackground(noLock);
+    const first = await b.addLocal('1', '🔄 Bookmark Sync');
+    const second = await b.addLocal('1', '🔄 Bookmark Sync');
+    await b.sandbox.getOrCreateSyncFolder();
+    await b.flush();
+    assert.strictEqual(b.store.duplicateSyncFolders, 1);
+    const kids = b.bookmarks.nodes.get('1').children;
+    kids.splice(kids.indexOf(second.id), 1);
+    b.bookmarks.nodes.delete(second.id);
+    const folder = await b.sandbox.getOrCreateSyncFolder();
+    await b.flush();
+    assert.strictEqual(folder.id, first.id);
+    assert.strictEqual(b.store.duplicateSyncFolders, 0);
+});
+
+test('popup: warns about extra sync folders', async () => {
+    const none = await popup('', { click: false });
+    assert.strictEqual(none.duplicateHidden, true);
+    const two = await popup('', { click: false, stored: { duplicateSyncFolders: 1 } });
+    assert.strictEqual(two.duplicateHidden, false);
+    assert.match(two.duplicateText, /^⚠️ 1 more "🔄 Bookmark Sync" folder\(s\) found/);
 });

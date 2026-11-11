@@ -143,15 +143,24 @@ document.addEventListener('DOMContentLoaded', async () => {
         $('version').textContent = `v${chrome.runtime.getManifest().version}`;
     }
 
-    chrome.storage.local.get(['lastSync', 'legacySeenAt'], (result) => {
+    // Several "🔄 Bookmark Sync" folders (counted by the background): only the oldest syncs
+    function renderDuplicateWarning(extra) {
+        const warning = $('duplicateWarning');
+        warning.hidden = !(extra > 0);
+        if (extra > 0) warning.textContent = t('duplicateFolders', extra);
+    }
+
+    chrome.storage.local.get(['lastSync', 'legacySeenAt', 'duplicateSyncFolders'], (result) => {
         renderLastSync(result.lastSync);
         renderLegacyWarning(result.legacySeenAt);
+        renderDuplicateWarning(result.duplicateSyncFolders);
     });
 
     chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== 'local') return;
         if (changes.lastSync) renderLastSync(changes.lastSync.newValue);
         if (changes.legacySeenAt) renderLegacyWarning(changes.legacySeenAt.newValue);
+        if (changes.duplicateSyncFolders) renderDuplicateWarning(changes.duplicateSyncFolders.newValue);
         if (changes.serverUrl || changes.username || changes.password) {
             chrome.storage.local.get(['serverUrl', 'username', 'password'], updateSetupCard);
         }

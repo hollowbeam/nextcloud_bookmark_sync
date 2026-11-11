@@ -115,6 +115,22 @@ async function oneDevice() {
             assert.strictEqual(file.id, undefined, 'file still in the old format');
             assert.ok(file.children.every(c => c.id === undefined && c.dateAdded === undefined));
         });
+
+        await step('Duplicate sync folder: the oldest keeps syncing, the extra one is reported', async () => {
+            await device.set({ autoSyncEnabled: false });
+            await settle();
+            const before = await server.titles();
+            const extra = await device.ev(() => new Promise(r => chrome.bookmarks.create({ parentId: '1', title: '🔄 Bookmark Sync' }, n => r(n.id))));
+            await device.ev((id) => new Promise(r => chrome.bookmarks.create({ parentId: id, title: 'In the duplicate', url: 'https://dup.example/' }, r)), extra);
+            const r = await device.sync();
+            assert.strictEqual(r.status, 'success', r.message);
+            assert.deepStrictEqual(await server.titles(), before, 'the duplicate was synced');
+            assert.strictEqual(await device.get('duplicateSyncFolders'), 1);
+            await device.ev((id) => new Promise(r => chrome.bookmarks.removeTree(id, r)), extra);
+            await settle();
+            await device.sync();
+            assert.strictEqual(await device.get('duplicateSyncFolders'), 0);
+        });
     } finally {
         await device.close();
     }
