@@ -123,7 +123,7 @@
     "message": "Import only"
   },
   "importOnlyHint": {
-    "message": "Applies the server's changes to this browser. This browser's changes not sent yet are kept, and sent by the next sync."
+    "message": "Applies the server's changes to this browser. This browser's changes not sent yet are kept and sent by the next sync, except on the first sync with this server, where the server wins."
   },
   "importing": {
     "message": "Importing..."

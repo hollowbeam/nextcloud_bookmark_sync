@@ -110,7 +110,7 @@ function loadBackground(server, { locale = i18n } = {}) {
                 local: {
                     get: (k, cb) => setImmediate(() => cb({ ...store })),
                     set: (o, cb) => { Object.assign(store, o); setImmediate(() => cb && cb()); },
-                    remove: (k) => { delete store[k]; },
+                    remove: (k, cb) => { delete store[k]; if (cb) setImmediate(cb); },
                 },
                 // Tests call storageChanged() to simulate a settings change from the popup
                 onChanged: { addListener(f) { storageListeners.push(f); } },
@@ -1400,3 +1400,26 @@ test('popup: the automatic sync state reads On or Paused', async () => {
     assert.strictEqual(paused.el('autoSyncState').textContent, 'Paused');
 });
 
+
+test('folder: a recreated folder is still restored when the first sync after it fails', async () => {
+    for (const action of ['pushBookmarksToServer', 'pullBookmarksFromServer']) {
+        const state = { remote: { title: 'root', children: [bm('A'), bm('B')] } };
+        const server = davServer(state);
+        let failGet = true;
+        const b = loadBackground((url, opts) => {
+            // The first read of the bookmarks file fails (503), after the folder was recreated
+            if (failGet && url === JSON_URL && opts.method === 'GET') { failGet = false; return { status: 503 }; }
+            return server(url, opts);
+        });
+        // Synced before, then the folder was deleted: no seed()
+        b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A'), bm('B')] };
+        assert.strictEqual((await b.call(action)).status, 'error');
+        await b.flush();
+        const res = await b.call(action);
+        await b.flush();
+        assert.strictEqual(res.status, 'success', `${action}: ${res.message}`);
+        assert.deepStrictEqual(titles(state.remote.children), ['A', 'B'], `${action}: server wiped`);
+        const folder = [...b.bookmarks.nodes.values()].find(n => n.title === '🔄 Bookmark Sync');
+        assert.deepStrictEqual(b.titlesIn(folder.id), ['A', 'B'], `${action}: folder not restored`);
+    }
+});

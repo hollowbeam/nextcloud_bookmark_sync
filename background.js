@@ -266,7 +266,10 @@ async function getOrCreateSyncFolder() {
                         if (index + 1 < parents.length) return tryCreate(index + 1);
                         return resolve({ id: null, created: true });
                     }
-                    resolve({ id: newFolder.id, created: true });
+                    // The old base described the folder that is gone. Dropped right away, so
+                    // that a sync failing after this point still restores the folder next time
+                    // instead of reading it as "everything deleted" (the created flag would be lost)
+                    chrome.storage.local.remove(SYNC_BASE_KEY, () => resolve({ id: newFolder.id, created: true }));
                 });
             };
             tryCreate(0);
