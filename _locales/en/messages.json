@@ -241,5 +241,8 @@
   },
   "localChangesPending": {
     "message": "Local changes not sent yet: they will be sent with the next sync."
+  },
+  "duplicateFolders": {
+    "message": "⚠️ $1 more \"🔄 Bookmark Sync\" folder(s) found (often after the browser's own sync). Only the oldest one is synced: move what you need into it, then delete the others."
   }
 }

@@ -241,5 +241,8 @@
   },
   "localChangesPending": {
     "message": "Des modifications locales restent à envoyer : elles partiront à la prochaine synchro."
+  },
+  "duplicateFolders": {
+    "message": "⚠️ $1 dossier(s) « 🔄 Bookmark Sync » en trop (souvent après la synchronisation du navigateur lui-même). Seul le plus ancien est synchronisé : déplacez-y ce dont vous avez besoin, puis supprimez les autres."
   }
 }
