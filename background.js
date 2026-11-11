@@ -243,7 +243,8 @@ async function getBookmarksTreeAsync(folderId) {
     // Recursively gets the local bookmark tree starting from folderId
     return new Promise(resolve => {
         chrome.bookmarks.getSubTree(folderId, (results) => {
-            resolve(results[0]);
+            void chrome.runtime.lastError; // Removed meanwhile: callers fail (inside their try)
+            resolve(results && results[0]);
         });
     });
 }
@@ -340,8 +341,8 @@ async function getOrCreateArchiveFolder(targetParentId, targetIndex) {
             if (dateFolder) return resolve(dateFolder.id);
 
             chrome.bookmarks.create({ parentId: mainArchiveId, title: today }, (f) => {
-                void chrome.runtime.lastError; // Then archived straight into the archive folder
-                resolve(f ? f.id : mainArchiveId);
+                void chrome.runtime.lastError; // Archive folder gone meanwhile: the caller retries
+                resolve(f ? f.id : null);
             });
         });
     });
@@ -619,8 +620,12 @@ async function applyTreeToLocal(syncFolderId, targetNodes, knownIds = null) {
                 || await getOrCreateArchiveFolder(rootParentId, rootIndex + 1);
             if (!archiveFolderId) throw new Error("Archive folder unavailable");
             for (const localNode of toArchive) {
-                await new Promise(resolve => {
-                    chrome.bookmarks.move(localNode.id, { parentId: archiveFolderId }, resolve);
+                // A failed move must not count as archived, nor let the base be saved
+                await new Promise((resolve, reject) => {
+                    chrome.bookmarks.move(localNode.id, { parentId: archiveFolderId }, (moved) => {
+                        if (chrome.runtime.lastError || !moved) return reject(new Error("Archiving failed"));
+                        resolve();
+                    });
                 });
                 archivedCount++;
                 console.log(`🗑️ Archived missing item: ${localNode.title}`);

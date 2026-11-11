@@ -1723,6 +1723,24 @@ test('archive: a sync does not hang if the archive folder vanishes while it arch
     assert.strictEqual(res.message, '1 archived.');
 });
 
+test('archive: a failed move is not counted as archived, and the base is not saved', async () => {
+    const state = { remote: { title: 'root', children: [] } };
+    const b = loadBackground(davServer(state));
+    const syncId = await b.seed();
+    await b.addLocal(syncId, 'A', bm('A').url);
+    const base = { fileUrl: JSON_URL, folderId: syncId, children: [bm('A')] };
+    b.store.syncBase = base;
+    const move = b.bookmarks.move;
+    b.bookmarks.move = (id, d, cb) => (d.index === undefined
+        ? setImmediate(() => { b.sandbox.chrome.runtime.lastError = { message: 'refused' }; cb(undefined); b.sandbox.chrome.runtime.lastError = undefined; })
+        : move(id, d, cb));
+    const res = await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual(res.status, 'error');
+    assert.strictEqual(b.store.syncBase, base);
+    assert.deepStrictEqual(b.titlesIn(syncId), ['A']);
+});
+
 test('startup: an update applied at startup keeps the import a minute after startup', async () => {
     const b = loadBackground(noLock);
     b.sandbox.chrome.runtime.startup();
