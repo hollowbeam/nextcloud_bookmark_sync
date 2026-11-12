@@ -64,7 +64,9 @@ Other settings:
 * **Archive retention:** how long deleted items stay in the archive before permanent deletion (1 to 30 days).
 * **Advanced › Import only:** applies the server's changes to this browser without sending this browser's changes.
 
-> **Note:** The extension only ever requests access to the one Nextcloud domain you configure (not to every website), when you first click **Test connection** or **Sync now**. Accept the prompt so the automatic background sync can reach your server afterwards. In Firefox, the popup closes while the prompt is shown: nothing is lost (the settings are saved as you type), and the next click on the button goes through.
+> **Note:** The extension only ever requests access to the one Nextcloud domain you configure (not to every website), when you first click **Test connection** or **Sync now**. Accept the prompt so the automatic background sync can reach your server afterwards. In Firefox and Edge, the popup closes while the prompt is shown: nothing is lost (the settings are saved as you type), and the next click on the button goes through.
+
+> **Self-signed certificate:** the server must have a certificate the browser trusts. Firefox lets you accept the exception for a self-signed certificate once, and the extension then works. In Chrome, Brave and Edge, accepting it in a tab is not enough for the extension's own requests: the test answers "Server unreachable" (seen on Edge). Use a certificate your system trusts, for example one from Let's Encrypt.
 
 ## 🛠️ How it Works (Under the Hood)
 
