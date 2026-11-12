@@ -24,7 +24,7 @@ Any change that alters what a user can see, or what the extension stores, sends 
 ## Before merging a change to the sync logic
 1. Unit and end-to-end tests pass, locally and in CI.
 2. The `reviewer` agent on the full diff since the last release once the design is stable, and again on the final state: not on isolated commits, since a bug can sit in an earlier unreleased PR. Check each finding in the code; test those marked « à confirmer » before fixing them. Browser behaviour (`bookmarks`, `alarms`, `permissions`, Chrome against Firefox) can't be checked by the agents: check it in the official documentation, with the source.
-3. One second review by another vendor's model (Gemini via `agy`, see the `/second-review` skill), on the final full diff, its findings checked the same way. Keep its report in `C:\Users\shini\Developments\second-reviews\`, not only in `%TEMP%`.
+3. One second review by another vendor's model (Gemini via `agy`, see the `/second-review` skill), on the final full diff, its findings checked the same way. Keep its report outside `%TEMP%`, which can be emptied (the maintainer uses `~/Developments/second-reviews/`).
 4. Manual check in Firefox, since CI only runs Chromium.
 
 ## Release
