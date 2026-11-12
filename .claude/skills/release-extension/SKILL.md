@@ -48,8 +48,9 @@ After the merge: `git switch main && git pull --ff-only`; annotated tag `vX.Y.Z`
 - Stores: hand over the two submission sheets and stop. Ask the user to tell you when each submission is done.
 
 ## 7. After the submissions
-- AMO: `curl -s "https://addons.mozilla.org/api/v5/addons/addon/nextcloud-bookmark-sync/?lang=en-US"`: `current_version.version` and `current_version.file.status` (`public` once approved). The public description differs only by AMO's own rendering (it strips U+FE0F and wraps 4-space indented lines in a code block): compare after ignoring those.
-- Chrome: the public page is cached and updates some time after the approval. Fetch `https://chromewebstore.google.com/detail/nextcloud-bookmark-sync/khfpengpkhgddoglikfbmbacpgokjnpo?hl=en` and look for the new version and for phrases of the new description.
+- Which version each store serves: `node tools/store-status.js`. It reads Chrome's update server (what a browser would install) and the AMO API, compares both with `manifest.json`, and exits with 1 while one store is behind. The Chrome update server is the reliable check: the store page is cached and lags by hours. If Chrome stays behind long after the submission, the item is not published: ask the user for its status in the dashboard (Published, Pending review, or approved and waiting for a manual "Publish" when "Defer publish" was chosen). Any model, or the user, can run this script and read its three lines.
+- AMO details: `current_version.file.status` is `public` once approved. The public description differs from `store-description.txt` only by AMO's own rendering (it strips U+FE0F and wraps 4-space indented lines in a code block): compare after ignoring those.
+- Chrome page: it updates after the package is live. When it is, fetch `https://chromewebstore.google.com/detail/nextcloud-bookmark-sync/khfpengpkhgddoglikfbmbacpgokjnpo?hl=en` and look for the new version and for phrases of the new description.
 - Update the release state in the project's memory file, and remind the user of loose ends: revoke the reviewers' app password when it is no longer needed.
 
 ## Known pitfalls
