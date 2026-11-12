@@ -11,20 +11,20 @@ Browser extension (Chrome, Brave, Edge, Firefox; Manifest V3) that syncs the boo
 - The version bump goes through its own PR (`release/X.Y.Z`); releases are annotated tags `vX.Y.Z`.
 
 ## Tests
-- Unit: `node --test` (`tests/sync.test.js`, background and popup in a Node vm with mocked browser and WebDAV APIs). Every fix gets a test that fails without it: check by running the new test against the previous commit.
+- Unit: `node --test` (`tests/sync.test.js`, background and popup in a Node vm with mocked browser and WebDAV APIs). Every fix gets a test that fails without it: check by running the new test against the previous commit. The mocks answer like the real browser: from the state at the time of the call (not of the answer), in the browser's order, and a test that passes whatever the mock timing proves nothing.
 - End-to-end: `bash tests/e2e/server.sh start` (Nextcloud in Docker behind an HTTPS gzip proxy), then `node tests/e2e/sync.e2e.js`. On Windows, use the installed Edge: `E2E_BROWSER=msedge`. Stop with `bash tests/e2e/server.sh stop`.
 - User-facing text lives in `_locales/en` and `_locales/fr` (same keys in both; `t()` in the code). The tests read the English messages.
 
 ## Sensitive areas
-Merge, base (it records which folder it describes), lock, conditional upload, folder handling (sync folder, duplicates, archive folder), `applyTreeToLocal`. Even a small change there starts with the `architect` agent, before any code: the 1.7.1 polish, thought of as five small points, produced two review findings on its own code (an archive cleanup contradicting another change, a race with a sync).
+Merge, base (it records which folder it describes), lock, conditional upload, folder handling (sync folder, duplicates, archive folder), `applyTreeToLocal`. Even a small change there starts with the `architect` agent, before any code.
 
 ## Documentation
 Any change that alters what a user can see, or what the extension stores, sends or requests (behaviour, permissions, messages, limits), is checked against the documentation before merging: the `doc-checker` agent on the diff (README, `privacy-policy.md`, `_locales/` with the same keys and placeholders in both languages), each finding checked in the code. New local data, a new permission or a new network request must appear in `privacy-policy.md`, and its effective date is updated when it changes.
 
 ## Before merging a change to the sync logic
 1. Unit and end-to-end tests pass, locally and in CI.
-2. The `reviewer` agent on the full diff since the last release (not only the last commit): a bug can sit in an earlier unreleased PR (the 1.7.1 review found one from #11). Check each finding in the code; test those marked « à confirmer » before fixing them. Browser behaviour (`bookmarks`, `alarms`, `permissions`, Chrome against Firefox) can't be checked by the agents: check it in the official documentation, with the source.
-3. A second review by another vendor's model (Gemini via `agy`, see the `/second-review` skill), its findings checked the same way. Keep its report in `C:\Users\shini\Developments\second-reviews\`, not only in `%TEMP%`.
+2. The `reviewer` agent on the full diff since the last release once the design is stable, and again on the final state: not on isolated commits, since a bug can sit in an earlier unreleased PR. Check each finding in the code; test those marked « à confirmer » before fixing them. Browser behaviour (`bookmarks`, `alarms`, `permissions`, Chrome against Firefox) can't be checked by the agents: check it in the official documentation, with the source.
+3. One second review by another vendor's model (Gemini via `agy`, see the `/second-review` skill), on the final full diff, its findings checked the same way. Keep its report in `C:\Users\shini\Developments\second-reviews\`, not only in `%TEMP%`.
 4. Manual check in Firefox, since CI only runs Chromium.
 
 ## Release
