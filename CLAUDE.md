@@ -13,6 +13,7 @@ Browser extension (Chrome, Brave, Edge, Firefox; Manifest V3) that syncs the boo
 ## Tests
 - Unit: `node --test` (`tests/sync.test.js`, background and popup in a Node vm with mocked browser and WebDAV APIs). Every fix gets a test that fails without it: check by running the new test against the previous commit. The mocks answer like the real browser: from the state at the time of the call (not of the answer), in the browser's order, and a test that passes whatever the mock timing proves nothing.
 - End-to-end: `bash tests/e2e/server.sh start` (Nextcloud in Docker behind an HTTPS gzip proxy), then `node tests/e2e/sync.e2e.js`. On Windows, use the installed Edge: `E2E_BROWSER=msedge`. Stop with `bash tests/e2e/server.sh stop`.
+- Lint: `npm run lint` (or `node tools/package.js && node tools/lint.js`) runs Mozilla's linter, the checks AMO runs, on the store zip; CI runs it in the `test` job. An error or a new warning fails: fix it, or add it to `KNOWN` in `tools/lint.js` with the reason it is accepted.
 - User-facing text lives in `_locales/en` and `_locales/fr` (same keys in both; `t()` in the code). The tests read the English messages.
 
 ## Sensitive areas

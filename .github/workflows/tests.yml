@@ -17,3 +17,7 @@ jobs:
         with:
           node-version: 22
       - run: node --test
+      - name: Store package lint (the checks AMO runs)
+        run: |
+          node tools/package.js
+          node tools/lint.js

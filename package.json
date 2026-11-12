@@ -9,6 +9,7 @@
     "e2e:server:stop": "bash tests/e2e/server.sh stop",
     "e2e": "node tests/e2e/sync.e2e.js",
     "package": "node tools/package.js",
+    "lint": "node tools/package.js && node tools/lint.js",
     "e2e:package": "node tests/e2e/package.e2e.js",
     "screenshots": "node tools/store-screenshots.js en && node tools/store-screenshots.js fr"
   },
