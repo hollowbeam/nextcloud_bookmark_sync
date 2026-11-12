@@ -27,7 +27,7 @@ Before using this extension, you will need:
 
 ## 📱 Mobile
 
-The extension is for desktop browsers only. On phones and tablets, browsers either don't run extensions (Chrome for Android) or don't give them access to bookmarks (Firefox for Android has no `bookmarks` API, see [Mozilla bug 1796597](https://bugzilla.mozilla.org/show_bug.cgi?id=1796597)), so there is nothing the extension could sync. On mobile, use your browser's own bookmark sync.
+The extension is for desktop browsers only. On phones and tablets, browsers either don't run extensions (Chrome for Android) or don't give them access to bookmarks (Firefox for Android has no `bookmarks` API, see [Mozilla bug 1796597](https://bugzilla.mozilla.org/show_bug.cgi?id=1796597)), so there is nothing the extension could sync. To get your bookmarks on a phone, use your browser's own sync (for example a Firefox account with Firefox Sync, or Brave Sync) and turn on bookmark sync in the browser on your phone.
 
 ## 🚀 Installation
 
