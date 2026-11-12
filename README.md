@@ -25,6 +25,10 @@ Before using this extension, you will need:
 2. A folder in Nextcloud Files for the bookmarks file, and its WebDAV URL (see the [Setup Guide](#setup-guide)).
 3. An **App Password** generated from your Nextcloud Security settings (Do not use your main Nextcloud password!).
 
+## 📱 Mobile
+
+The extension is for desktop browsers only. On phones and tablets, browsers either don't run extensions (Chrome for Android) or don't give them access to bookmarks (Firefox for Android has no `bookmarks` API, see [Mozilla bug 1796597](https://bugzilla.mozilla.org/show_bug.cgi?id=1796597)), so there is nothing the extension could sync. On mobile, use your browser's own bookmark sync.
+
 ## 🚀 Installation
 
 **From the stores (recommended):**
