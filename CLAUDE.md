@@ -18,6 +18,9 @@ Browser extension (Chrome, Brave, Edge, Firefox; Manifest V3) that syncs the boo
 ## Sensitive areas
 Merge, base (it records which folder it describes), lock, conditional upload, folder handling (sync folder, duplicates, archive folder), `applyTreeToLocal`. Even a small change there starts with the `architect` agent, before any code: the 1.7.1 polish, thought of as five small points, produced two review findings on its own code (an archive cleanup contradicting another change, a race with a sync).
 
+## Documentation
+Any change that alters what a user can see, or what the extension stores, sends or requests (behaviour, permissions, messages, limits), is checked against the documentation before merging: the `doc-checker` agent on the diff (README, `privacy-policy.md`, `_locales/` with the same keys and placeholders in both languages), each finding checked in the code. New local data, a new permission or a new network request must appear in `privacy-policy.md`, and its effective date is updated when it changes.
+
 ## Before merging a change to the sync logic
 1. Unit and end-to-end tests pass, locally and in CI.
 2. The `reviewer` agent on the full diff since the last release (not only the last commit): a bug can sit in an earlier unreleased PR (the 1.7.1 review found one from #11). Check each finding in the code; test those marked « à confirmer » before fixing them. Browser behaviour (`bookmarks`, `alarms`, `permissions`, Chrome against Firefox) can't be checked by the agents: check it in the official documentation, with the source.
