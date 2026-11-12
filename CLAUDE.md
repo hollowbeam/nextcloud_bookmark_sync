@@ -28,8 +28,8 @@ Merge, base (it records which folder it describes), lock, conditional upload, fo
 1. Bump `manifest.json` in a `release/X.Y.Z` PR, merge, tag `vX.Y.Z` on the merge commit.
 2. `node tools/package.js vX.Y.Z` builds `dist/nextcloud_bookmark_sync-X.Y.Z.zip` (with `_locales/`: without it the extension doesn't load), then `node tests/e2e/package.e2e.js` loads that zip in English and French.
 3. Store screenshots if the popup changed: `node tools/store-screenshots.js en` and `fr` (1280x800, `dist/screenshots/`).
-4. GitHub release with the zip; store notes stay out of the GitHub notes.
-5. Stores: AMO's description must contain no link, no bracketed URL and no "›" (saving hangs without an error); the setup guide link goes in the Homepage field. Write "and" rather than "&" (AMO shows `&amp;`).
+4. GitHub release with the zip; store notes stay out of the GitHub notes. Release notes, GitHub and stores, are written in English only.
+5. Stores: one version-free description for both, written within AMO's limits: no link, no bracketed URL and no "›" (saving hangs without an error), and "and" rather than "&" (AMO shows `&amp;`). The setup guide link goes in the store's Homepage or Support field, not in the text.
 
 ## Working here
 - Edit files with the editor tools or a script file, never by passing text through a shell command: backticks, `$` and backslashes get executed or mangled.
