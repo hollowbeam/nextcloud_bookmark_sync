@@ -838,11 +838,16 @@ test('separator: a separator already in the Firefox folder is matched, not dupli
     const state = { remote: { title: 'root', children: [bm('A'), SEP, bm('B')] } };
     const { b, id } = await deviceWith(state, [bm('A'), SEP, bm('B')], [bm('A'), bm('B')], { firefox: true });
     await new Promise(r => b.bookmarks.create({ parentId: id, type: 'separator' }, r));
-    await new Promise(r => b.bookmarks.move([...b.bookmarks.nodes.values()].find(n => n.separator).id, { index: 1 }, r));
+    const sepId = [...b.bookmarks.nodes.values()].find(n => n.separator).id;
+    await new Promise(r => b.bookmarks.move(sepId, { index: 1 }, r));
     const res = await b.call('pullBookmarksFromServer');
     await b.flush();
     assert.strictEqual(res.status, 'success', res.message);
     assert.deepStrictEqual(kinds(b, id), ['A', '---', 'B']);
+    // Matched, not replaced: the same node, nothing archived, nothing created
+    assert.strictEqual(b.bookmarks.nodes.get(sepId).parentId, id);
+    assert.strictEqual([...b.bookmarks.nodes.values()].filter(n => n.separator).length, 1);
+    assert.strictEqual(res.message, 'Up to date.');
 });
 
 test('push: a failed upload after a merge leaves the remote we read as the base', async () => {
