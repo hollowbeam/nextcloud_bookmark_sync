@@ -677,10 +677,11 @@ test('refused folder: a failed upload does not leave the refused folder in the b
     b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A'), { title: 'BADFOLDER', children: [bm('X')] }] };
     assert.notStrictEqual((await b.call('pushBookmarksToServer')).status, 'success');
     assert.strictEqual(failNext, false, 'the 503 was not served: the upload was never attempted');
+    assert.deepStrictEqual(flat(b.store.syncBase.children), ['A'], 'the refused folder entered the base');
     await b.flush();
     assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
     await b.flush();
-    assert.ok(flat(state.remote.children).join().includes('Y'), 'Y was deleted from the server');
+    assert.deepStrictEqual(flat(state.remote.children), ['A', 'BADFOLDER[X,Y]']);
 });
 
 test('refused folder: inside another folder too', async () => {
