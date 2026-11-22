@@ -676,6 +676,7 @@ test('refused folder: a failed upload does not leave the refused folder in the b
     await b.addLocal((await new Promise(r => b.bookmarks.search({ title: '🔄 Bookmark Sync' }, r)))[0].id, 'A', bm('A').url);
     b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A'), { title: 'BADFOLDER', children: [bm('X')] }] };
     assert.notStrictEqual((await b.call('pushBookmarksToServer')).status, 'success');
+    assert.strictEqual(failNext, false, 'the 503 was not served: the upload was never attempted');
     await b.flush();
     assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
     await b.flush();
