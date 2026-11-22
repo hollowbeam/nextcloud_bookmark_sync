@@ -464,9 +464,11 @@ function mergeChildren(baseNodes, localNodes, remoteNodes) {
 function withoutSkipped(nodes, skipped, targetNodes = nodes) {
     if (!skipped || skipped.size === 0) return nodes;
     const id = (node) => node.url ? 'u:' + node.url : 'f:' + node.title;
-    const refused = new Set(targetNodes.filter(node => skipped.has(node)).map(id));
+    // Separators left out (Chromium) are the server's own objects: matched as objects, not by
+    // URL, or the "data:" bookmarks an older version made for the others would leave the base
+    const refused = new Set(targetNodes.filter(node => skipped.has(node) && node.url !== SEPARATOR_URL).map(id));
     return nodes
-        .filter(node => !refused.has(id(node)))
+        .filter(node => !refused.has(id(node)) && !skipped.has(node))
         .map(node => {
             if (node.url) return node;
             const twins = targetNodes.filter(target => !target.url && target.title === node.title);

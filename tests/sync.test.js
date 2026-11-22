@@ -819,6 +819,21 @@ test('separator: deleting a folder on Chromium deletes it from the server, thoug
     assert.deepStrictEqual(b.titlesIn(id), ['A']);
 });
 
+test('separator: separators deleted on Firefox stay deleted when Chromium holds 1.7.1 data: bookmarks and one more separator came', async () => {
+    // Only the separators left out are filtered from the base: not every "data:" sibling,
+    // or the data: bookmarks matched to separators would read as local additions and be sent back
+    const state = { remote: { title: 'root', children: [bm('A'), SEP, SEP, SEP, bm('B')] } };
+    const { b } = await deviceWith(state, [bm('A'), SEP, SEP, bm('B')], [bm('A'), SEP, SEP, bm('B')], { firefox: false });
+    const res = await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual(res.status, 'success', res.message);
+    state.remote.children = [bm('A'), bm('B')]; // Firefox deleted every separator
+    state.version++;
+    assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
+    await b.flush();
+    assert.deepStrictEqual(state.remote.children.map(n => n.url === 'data:' ? '---' : n.title), ['A', 'B']);
+});
+
 test('separator: a separator already in the Firefox folder is matched, not duplicated', async () => {
     const state = { remote: { title: 'root', children: [bm('A'), SEP, bm('B')] } };
     const { b, id } = await deviceWith(state, [bm('A'), SEP, bm('B')], [bm('A'), bm('B')], { firefox: true });
