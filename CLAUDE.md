@@ -22,6 +22,8 @@ Merge, base (it records which folder it describes), lock, conditional upload, fo
 ## Documentation
 Any change that alters what a user can see, or what the extension stores, sends or requests (behaviour, permissions, messages, limits), is checked against the documentation before merging: the `doc-checker` agent on the diff (README, `privacy-policy.md`, `_locales/` with the same keys and placeholders in both languages), each finding checked in the code. New local data, a new permission or a new network request must appear in `privacy-policy.md`, and its effective date is updated when it changes.
 
+Every document is also linted before it is committed or handed over, whatever its format (a user-level rule). Markdown here: `npx --yes markdownlint-cli` with its default rules except MD013 (line length), which this project's own files ignore. The release documents, which live outside the repository, are linted the same way. The `doc-checker` reads and does not lint, so a release document goes through both checks.
+
 ## Before merging a change to the sync logic
 1. Unit and end-to-end tests pass, locally and in CI.
 2. The `reviewer` agent on the full diff since the last release once the design is stable, and again on the final state: not on isolated commits, since a bug can sit in an earlier unreleased PR. Check each finding in the code; test those marked « à confirmer » before fixing them. Browser behaviour (`bookmarks`, `alarms`, `permissions`, Chrome against Firefox) can't be checked by the agents: check it in the official documentation, with the source.
