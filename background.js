@@ -453,12 +453,22 @@ function mergeChildren(baseNodes, localNodes, remoteNodes) {
 }
 
 // Entries this browser refused to create stay out of the base: they then keep reading
-// as remote additions (retried, kept on the server) rather than as local deletions
-function withoutSkipped(nodes, skipped) {
+// as remote additions (retried, kept on the server) rather than as local deletions.
+// targetNodes: the merged tree they were refused from. Matched by URL or title among
+// siblings, not as objects: the merge builds new ones (e.g. a folder kept for what the
+// other side added to it), which the remote tree doesn't hold. Same-named siblings all
+// go: a smaller base only keeps more, it never deletes.
+function withoutSkipped(nodes, skipped, targetNodes = nodes) {
     if (!skipped || skipped.size === 0) return nodes;
+    const id = (node) => node.url ? 'u:' + node.url : 'f:' + node.title;
+    const refused = new Set(targetNodes.filter(node => skipped.has(node)).map(id));
     return nodes
-        .filter(node => !skipped.has(node))
-        .map(node => node.url ? node : { title: node.title, children: withoutSkipped(node.children, skipped) });
+        .filter(node => !refused.has(id(node)))
+        .map(node => {
+            if (node.url) return node;
+            const twins = targetNodes.filter(target => !target.url && target.title === node.title);
+            return { title: node.title, children: withoutSkipped(node.children, skipped, twins.flatMap(twin => twin.children)) };
+        });
 }
 
 // The base is tied to the remote file and to the local folder: after a server change,
@@ -717,7 +727,7 @@ async function pushBookmarksToServer(sendResponse = () => {}) {
                 }
                 // The merge is applied locally: if the upload fails, the remote we read
                 // is the base, so its items aren't mistaken for local additions next time
-                await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped), syncFolderId);
+                await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped, uploadChildren), syncFolderId);
             }
 
             // Nothing new for the server: no upload, so no new ETag for other devices
@@ -836,7 +846,7 @@ async function pullBookmarksFromServer(sendResponse = () => {}) {
             const target = mergeChildren(savedBase || local.children, local.children, remote.tree.children);
 
             const { counts, skipped } = await applyTreeToLocal(syncFolderId, target, knownIds);
-            await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped), syncFolderId);
+            await saveSyncBase(fileUrl, withoutSkipped(remote.tree.children, skipped, target), syncFolderId);
 
             // Kept local changes still have to reach the server
             exportNeeded = !sameTree(target, remote.tree.children) || remote.legacy;

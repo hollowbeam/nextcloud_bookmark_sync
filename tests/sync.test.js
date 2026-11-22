@@ -646,6 +646,78 @@ test('sync: an entry this browser refuses is never deleted from the server', asy
     assert.ok(!titles(b.store.syncBase.children).includes('Bad'));
 });
 
+// A folder this browser refuses to create (the mock refuses the title BADFOLDER) while the
+// merge keeps it for what another device added to it: the base must not record it, or the
+// next sync reads the bookmarks inside as deleted here and removes them from the server.
+const flat = (nodes) => nodes.map(n => (n.children ? `${n.title}[${flat(n.children)}]` : n.title));
+const folderLocal = (b, parentId, title) => new Promise(r => b.bookmarks.create({ parentId, title }, r));
+
+test('refused folder: what another device added to it is kept on the server', async () => {
+    const state = { remote: { title: 'root', children: [bm('A'), { title: 'BADFOLDER', children: [bm('X'), bm('Y')] }] } };
+    const { b } = await deviceWith(state, [bm('A'), { title: 'BADFOLDER', children: [bm('X')] }], [bm('A')]);
+    const res = await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual(res.status, 'success', res.message);
+    assert.deepStrictEqual(flat(b.store.syncBase.children), ['A'], 'the refused folder entered the base');
+    assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
+    await b.flush();
+    assert.deepStrictEqual(flat(state.remote.children), ['A', 'BADFOLDER[X,Y]']);
+});
+
+test('refused folder: a failed upload does not leave the refused folder in the base', async () => {
+    const state = { remote: { title: 'root', children: [bm('A'), { title: 'BADFOLDER', children: [bm('X'), bm('Y')] }] } };
+    const dav = davServer(state);
+    let failNext = true;
+    const b = loadBackground((url, opts) => {
+        if (url === JSON_URL && opts.method === 'PUT' && failNext) { failNext = false; return { status: 503 }; }
+        return dav(url, opts);
+    });
+    await b.seed();
+    await b.addLocal((await new Promise(r => b.bookmarks.search({ title: '🔄 Bookmark Sync' }, r)))[0].id, 'A', bm('A').url);
+    b.store.syncBase = { fileUrl: JSON_URL, children: [bm('A'), { title: 'BADFOLDER', children: [bm('X')] }] };
+    assert.notStrictEqual((await b.call('pushBookmarksToServer')).status, 'success');
+    await b.flush();
+    assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
+    await b.flush();
+    assert.ok(flat(state.remote.children).join().includes('Y'), 'Y was deleted from the server');
+});
+
+test('refused folder: inside another folder too', async () => {
+    const state = { remote: { title: 'root', children: [{ title: 'P', children: [{ title: 'BADFOLDER', children: [bm('X'), bm('Y')] }] }] } };
+    const { b, id } = await deviceWith(state, [{ title: 'P', children: [{ title: 'BADFOLDER', children: [bm('X')] }] }], []);
+    await folderLocal(b, id, 'P');
+    await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
+    await b.flush();
+    assert.deepStrictEqual(flat(state.remote.children), ['P[BADFOLDER[X,Y]]']);
+});
+
+test('refused folder: a permanent refusal is stable, nothing is sent, nothing is lost', async () => {
+    const state = { remote: { title: 'root', children: [bm('A'), { title: 'BADFOLDER', children: [bm('X'), bm('Y')] }] } };
+    const { b } = await deviceWith(state, [bm('A'), { title: 'BADFOLDER', children: [bm('X')] }], [bm('A')]);
+    for (let i = 0; i < 2; i++) {
+        assert.strictEqual((await b.call('pullBookmarksFromServer')).message, '1 skipped.');
+        await b.flush();
+        const res = await b.call('pushBookmarksToServer');
+        assert.strictEqual(res.status, 'success', res.message);
+        await b.flush();
+    }
+    assert.strictEqual(state.puts || 0, 0);
+    assert.deepStrictEqual(flat(state.remote.children), ['A', 'BADFOLDER[X,Y]']);
+});
+
+test('refused folder: a deletion in a sibling folder still reaches the server', async () => {
+    const state = { remote: { title: 'root', children: [{ title: 'BADFOLDER', children: [bm('X'), bm('Y')] }, { title: 'G', children: [bm('Z')] }] } };
+    const { b, id } = await deviceWith(state, [{ title: 'BADFOLDER', children: [bm('X')] }, { title: 'G', children: [bm('Z')] }], []);
+    await folderLocal(b, id, 'G'); // Z was deleted here
+    await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
+    await b.flush();
+    assert.deepStrictEqual(flat(state.remote.children), ['BADFOLDER[X,Y]', 'G[]']);
+});
+
 test('push: a failed upload after a merge leaves the remote we read as the base', async () => {
     const state = { remote: { title: 'root', children: [bm('A'), bm('R')] } };
     const server = davServer(state);
