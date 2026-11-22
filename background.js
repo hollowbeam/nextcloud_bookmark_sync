@@ -24,6 +24,7 @@
 const SYNC_FOLDER_NAME = "🔄 Bookmark Sync";
 const ARCHIVE_FOLDER_NAME = "🗑️ Bookmark Archives";
 const LOCK_FILE_NAME = "bookmarks_sync.lock";
+const SEPARATOR_URL = "data:"; // How Firefox reports a separator, and so how the file stores it
 const LOCK_STALE_MS = 5 * 60 * 1000; // Ignore locks older than this (crashed device safety net)
 
 const PENDING_EXPORT_ALARM = "pendingExport";
@@ -416,7 +417,9 @@ function mergeChildren(baseNodes, localNodes, remoteNodes) {
         const kept = l || r;
         if (!kept || kept.url || b.url) return null;
         const children = mergeChildren(b.children, l ? l.children : [], r ? r.children : []);
-        return children.length > 0 ? { title: kept.title, children } : null;
+        // Separators alone don't keep it: Chromium leaves them out of its base, so a
+        // Firefox separator would read as an addition and bring back a folder deleted there
+        return children.some(child => child.url !== SEPARATOR_URL) ? { title: kept.title, children } : null;
     };
 
     // Order: the remote one, unless only the local side reordered since the base.
@@ -563,6 +566,9 @@ async function applyTreeToLocal(syncFolderId, targetNodes, knownIds = null) {
     let renamedCount = 0;
     let archivedCount = 0;
     const skipped = new Set(); // Target nodes the browser refused to create
+    // Firefox bookmarks have a type; Chromium's don't. Only Firefox has separators.
+    const hasSeparators = syncFolderInfo[0].type === 'folder';
+    let separatorsLeftOut = 0; // Separators from Firefox, not creatable here: not an error
 
     const getChildrenAsync = (parentId) => {
         return new Promise(resolve => chrome.bookmarks.getChildren(parentId, resolve));
@@ -596,12 +602,20 @@ async function applyTreeToLocal(syncFolderId, targetNodes, knownIds = null) {
             if (remoteNode.url) {
                 if (localMatch) {
                     claimedIds.add(localMatch.id);
-                    if (localMatch.title !== remoteNode.title) {
+                    if (localMatch.title !== remoteNode.title && localMatch.type !== 'separator') {
                         await new Promise(resolve => chrome.bookmarks.update(localMatch.id, { title: remoteNode.title }, resolve));
                         renamedCount++;
                     }
+                } else if (remoteNode.url === SEPARATOR_URL && !hasSeparators) {
+                    // Left out of the base like a refused entry, so it stays on the server
+                    skipped.add(remoteNode);
+                    separatorsLeftOut++;
                 } else {
-                    const created = await createNodeAsync({ parentId: localParentId, title: remoteNode.title, url: remoteNode.url }, remoteNode);
+                    // A Firefox separator is exported as { url: "data:" }: made back into one
+                    const details = remoteNode.url === SEPARATOR_URL
+                        ? { parentId: localParentId, type: 'separator' }
+                        : { parentId: localParentId, title: remoteNode.title, url: remoteNode.url };
+                    const created = await createNodeAsync(details, remoteNode);
                     if (created) {
                         claimedIds.add(created.id);
                         addedCount++;
@@ -661,7 +675,7 @@ async function applyTreeToLocal(syncFolderId, targetNodes, knownIds = null) {
 
     await syncNodes(targetNodes, syncFolderId);
     return {
-        counts: { added: addedCount, archived: archivedCount, renamed: renamedCount, skipped: skipped.size },
+        counts: { added: addedCount, archived: archivedCount, renamed: renamedCount, skipped: skipped.size - separatorsLeftOut },
         skipped,
     };
 }

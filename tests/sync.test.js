@@ -27,14 +27,18 @@ const STORAGE = { serverUrl: 'https://cloud.example/dav', username: 'u', passwor
 const LOCK_URL = 'https://cloud.example/dav/bookmarks_sync.lock';
 const JSON_URL = 'https://cloud.example/dav/bookmarks_sync.json';
 
-function makeBookmarks(runtime) {
+// firefox: like Firefox, nodes have a type and a separator exists, reported with the
+// url "data:" (checked on Firefox 160). Chromium has neither and, like Edge, creates
+// a bookmark for any "data:" url (checked on Edge).
+function makeBookmarks(runtime, { firefox = false } = {}) {
     let nextId = 100;
     const nodes = new Map();
     const add = (n) => { nodes.set(n.id, n); return n; };
     add({ id: '0', title: 'root', children: [] });
     add({ id: '1', parentId: '0', title: 'bar', children: [] });
     nodes.get('0').children.push('1');
-    const view = (n) => ({ id: n.id, parentId: n.parentId, title: n.title, url: n.url, dateAdded: n.dateAdded, index: n.parentId ? nodes.get(n.parentId).children.indexOf(n.id) : 0 });
+    const kind = (n) => (n.separator ? 'separator' : n.url ? 'bookmark' : 'folder');
+    const view = (n) => ({ id: n.id, parentId: n.parentId, title: n.title, url: n.url, dateAdded: n.dateAdded, index: n.parentId ? nodes.get(n.parentId).children.indexOf(n.id) : 0, ...(firefox ? { type: kind(n) } : {}) });
     const fail = (cb, message) => { runtime.lastError = { message }; cb(undefined); runtime.lastError = undefined; };
     const moves = [];
     const api = {
@@ -53,7 +57,10 @@ function makeBookmarks(runtime) {
             if ((d.url && d.url.startsWith('chrome://')) || d.title === 'BADFOLDER') return fail(cb, 'refused');
             if (d.parentId && !nodes.has(d.parentId)) return fail(cb, 'Invalid parent');
             const parentId = d.parentId || '1';
-            const n = add({ id: String(nextId++), parentId, title: d.title, url: d.url, children: d.url ? undefined : [] });
+            const separator = firefox && d.type === 'separator';
+            const n = add(separator
+                ? { id: String(nextId++), parentId, title: '', url: 'data:', separator: true }
+                : { id: String(nextId++), parentId, title: d.title, url: d.url, children: d.url ? undefined : [] });
             nodes.get(parentId).children.push(n.id);
             cb(view(n));
         }),
@@ -96,9 +103,9 @@ function makeBookmarks(runtime) {
     return api;
 }
 
-function loadBackground(server, { locale = i18n } = {}) {
+function loadBackground(server, { locale = i18n, firefox = false } = {}) {
     const runtime = { lastError: undefined, onMessage: { addListener(f) { runtime.message = f; } }, onInstalled: { addListener(f) { runtime.installed = f; } }, onStartup: { addListener(f) { runtime.startup = f; } } };
-    const bookmarks = makeBookmarks(runtime);
+    const bookmarks = makeBookmarks(runtime, { firefox });
     const timers = [];
     const log = [];
     const store = { ...STORAGE };
@@ -476,8 +483,8 @@ test('merge: duplicate URLs are matched one to one', () => {
 // Two devices
 // ------------------------------------------------------------------
 
-async function deviceWith(state, base, localItems) {
-    const b = loadBackground(davServer(state));
+async function deviceWith(state, base, localItems, options) {
+    const b = loadBackground(davServer(state), options);
     const id = await b.seed();
     for (const item of localItems) await b.addLocal(id, item.title, item.url);
     if (base) b.store.syncBase = { fileUrl: JSON_URL, children: base };
@@ -718,6 +725,109 @@ test('refused folder: a deletion in a sibling folder still reaches the server', 
     assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
     await b.flush();
     assert.deepStrictEqual(flat(state.remote.children), ['BADFOLDER[X,Y]', 'G[]']);
+});
+
+// A Firefox separator is stored in the file as { title: "", url: "data:" }
+const SEP = { title: '', url: 'data:' };
+const kinds = (b, id) => b.bookmarks.nodes.get(id).children.map(c => { const n = b.bookmarks.nodes.get(c); return n.separator ? '---' : n.title; });
+
+test('separator: an imported separator is created as a separator on Firefox, not as a bookmark', async () => {
+    const state = { remote: { title: 'root', children: [bm('A'), SEP, bm('B'), { title: 'F', children: [bm('X'), SEP] }] } };
+    const { b, id } = await deviceWith(state, null, [], { firefox: true });
+    const res = await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual(res.status, 'success', res.message);
+    assert.strictEqual(res.message, '5 added.'); // A, B, X and the two separators
+    assert.deepStrictEqual(kinds(b, id), ['A', '---', 'B', 'F']);
+    const folder = [...b.bookmarks.nodes.values()].find(n => n.title === 'F');
+    assert.deepStrictEqual(kinds(b, folder.id), ['X', '---']);
+});
+
+test('separator: Chromium deleting a neighbour in a folder keeps the separator on the server', async () => {
+    const state = { remote: { title: 'root', children: [bm('A'), { title: 'F', children: [bm('X'), SEP] }] } };
+    const { b, id } = await deviceWith(state, [bm('A'), { title: 'F', children: [bm('X')] }], [bm('A')], { firefox: false });
+    await new Promise(r => b.bookmarks.create({ parentId: id, title: 'F' }, r)); // F is there, X was deleted
+    for (let i = 0; i < 2; i++) {
+        assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
+        await b.flush();
+    }
+    assert.deepStrictEqual(state.remote.children[1].children.map(n => n.url === 'data:' ? '---' : n.title), ['---']);
+});
+
+test("separator: Firefox doesn't rename a separator to the title an old data: bookmark got elsewhere", async () => {
+    const state = { remote: { title: 'root', children: [bm('A'), { title: 'x', url: 'data:' }] } };
+    const { b, id } = await deviceWith(state, null, [bm('A')], { firefox: true });
+    await new Promise(r => b.bookmarks.create({ parentId: id, type: 'separator' }, r));
+    const renamed = [];
+    const update = b.bookmarks.update;
+    b.bookmarks.update = (nodeId, changes, cb) => { renamed.push(nodeId); return update(nodeId, changes, cb); };
+    const res = await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.deepStrictEqual(renamed, []);
+    assert.ok(!/renamed/.test(res.message), res.message);
+    assert.deepStrictEqual(kinds(b, id), ['A', '---']);
+});
+
+test('separator: Chromium creates nothing for it, says nothing, and never deletes it from the server', async () => {
+    const state = { remote: { title: 'root', children: [bm('A'), SEP, bm('B'), { title: 'F', children: [bm('X'), SEP] }] } };
+    const { b, id } = await deviceWith(state, null, [], { firefox: false });
+    const res = await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual(res.status, 'success', res.message);
+    assert.strictEqual(res.message, '3 added.');
+    assert.deepStrictEqual(b.titlesIn(id), ['A', 'B', 'F']);
+    await b.addLocal(id, 'L', bm('L').url);
+    for (let i = 0; i < 2; i++) {
+        assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
+        await b.flush();
+    }
+    const flat = (nodes) => nodes.map(n => (n.children ? `${n.title}[${flat(n.children)}]` : n.url === 'data:' ? '---' : n.title));
+    assert.deepStrictEqual(flat(state.remote.children), ['A', '---', 'B', 'F[X,---]', 'L']);
+    assert.ok(!JSON.stringify(b.store.syncBase.children).includes('data:'), 'a separator entered the base');
+});
+
+test('separator: a data: bookmark left by 1.7.1 on Chromium stays in place, the separator stays on the server', async () => {
+    const state = { remote: { title: 'root', children: [bm('A'), SEP, bm('B')] } };
+    const { b, id } = await deviceWith(state, [bm('A'), SEP, bm('B')], [bm('A'), SEP, bm('B')], { firefox: false });
+    for (let i = 0; i < 2; i++) {
+        const res = await b.call('pullBookmarksFromServer');
+        await b.flush();
+        assert.ok(!/skipped|renamed|archived|added/.test(res.message), res.message);
+    }
+    await b.addLocal(id, 'L', bm('L').url);
+    for (let i = 0; i < 2; i++) {
+        assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
+        await b.flush();
+    }
+    assert.deepStrictEqual(b.titlesIn(id), ['A', '', 'B', 'L']);
+    assert.deepStrictEqual(state.remote.children.map(n => n.url === 'data:'), [false, true, false, false]);
+    assert.ok(!b.bookmarks.nodes.get([...b.bookmarks.nodes.values()].find(n => n.title === '🗑️ Bookmark Archives')?.id || 'none'), 'something was archived');
+});
+
+test('separator: deleting a folder on Chromium deletes it from the server, though it holds a Firefox separator', async () => {
+    const state = { remote: { title: 'root', children: [bm('A'), { title: 'F', children: [bm('X'), SEP] }] } };
+    // The base has no separator: Chromium never keeps one there
+    const { b, id } = await deviceWith(state, [bm('A'), { title: 'F', children: [bm('X')] }], [bm('A')], { firefox: false });
+    const folder = await new Promise(r => b.bookmarks.create({ parentId: id, title: 'F' }, r));
+    await b.addLocal(folder.id, 'X', bm('X').url);
+    await new Promise(r => b.bookmarks.removeTree(folder.id, r));
+    for (let i = 0; i < 2; i++) {
+        assert.strictEqual((await b.call('pushBookmarksToServer')).status, 'success');
+        await b.flush();
+    }
+    assert.deepStrictEqual(titles(state.remote.children), ['A']);
+    assert.deepStrictEqual(b.titlesIn(id), ['A']);
+});
+
+test('separator: a separator already in the Firefox folder is matched, not duplicated', async () => {
+    const state = { remote: { title: 'root', children: [bm('A'), SEP, bm('B')] } };
+    const { b, id } = await deviceWith(state, [bm('A'), SEP, bm('B')], [bm('A'), bm('B')], { firefox: true });
+    await new Promise(r => b.bookmarks.create({ parentId: id, type: 'separator' }, r));
+    await new Promise(r => b.bookmarks.move([...b.bookmarks.nodes.values()].find(n => n.separator).id, { index: 1 }, r));
+    const res = await b.call('pullBookmarksFromServer');
+    await b.flush();
+    assert.strictEqual(res.status, 'success', res.message);
+    assert.deepStrictEqual(kinds(b, id), ['A', '---', 'B']);
 });
 
 test('push: a failed upload after a merge leaves the remote we read as the base', async () => {
